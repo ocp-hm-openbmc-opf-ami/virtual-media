@@ -137,6 +137,7 @@ target_compile_definitions(
 
 if(CMAKE_INSTALL_SYSCONFDIR)
   install(FILES ${PROJECT_SOURCE_DIR}/virtual-media.json
+          PERMISSIONS OWNER_WRITE OWNER_READ
           DESTINATION ${CMAKE_INSTALL_SYSCONFDIR})
 endif()
 install(FILES ${PROJECT_SOURCE_DIR}/xyz.openbmc_project.VirtualMedia.service
