@@ -7,7 +7,7 @@ project(
         'cpp_std=c++20',
         'cpp_rtti=false',
     ],
-    license: 'Proprietary',
+    license: 'Apache-2.0',
     version: '0.1',
 )
 
