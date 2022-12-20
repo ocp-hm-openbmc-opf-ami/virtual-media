@@ -204,7 +204,7 @@ srcfiles_app = [ 'src/main.cpp',
                  'src/state/activating_state.cpp',
                ]
 
-bindir = get_option('prefix') + '/' +get_option('bindir')
+bindir = get_option('prefix') + '/' +get_option('libexecdir')
 
 if get_option('legacy-mode').enabled()
   add_project_arguments(
