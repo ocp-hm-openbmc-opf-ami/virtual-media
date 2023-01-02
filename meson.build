@@ -157,6 +157,10 @@ if not sdbusplus.found()
   sdbusplus = sdbusplus.as_system('system')
 endif
 
+nbd = dependency('nbd',
+                  version: '>=3.17',
+                  fallback:['nbd','nbd_dep'])
+
 boost = dependency('boost',
                    modules: ['coroutine', 'iostreams', 'filesystem',
 			     'program_options', 'regex', 'system'],

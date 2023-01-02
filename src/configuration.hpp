@@ -49,7 +49,7 @@ class Configuration
                 std::to_string(mp.timeout.value_or(defaultTimeout));
             std::vector<std::string> args = {
                 "-t", timeout, "-u", mp.unixSocket, mp.nbdDevice.to_path(),
-                "-n"};
+                "-nL"};
             return args;
         }
     };
