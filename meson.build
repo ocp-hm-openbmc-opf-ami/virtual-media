@@ -217,6 +217,13 @@ if get_option('legacy-mode').enabled()
     language: 'cpp')
 endif
 
+if get_option('verbose-nbdkit-logs').enabled()
+  add_project_arguments(
+    cxx.get_supported_arguments([
+      '-DVM_VERBOSE_NBDKIT_LOGS=ON',]),
+    language: 'cpp')
+endif
+
 executable('virtual-media',
            srcfiles_app,
            dependencies: [ systemd, boost, udev, udev_lib_dep,
