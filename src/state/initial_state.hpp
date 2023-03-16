@@ -41,9 +41,6 @@ struct InitialState : public BasicStateT<InitialState>
         addProcessInterface(event);
         addServiceInterface(event, isLegacy);
 
-        // Workaround for HSD18020136609. Details in system.hpp.
-        UdevGadget::forceUdevChange();
-
         return std::make_unique<ReadyState>(machine);
     }
 

@@ -176,7 +176,6 @@ class NBDDevice
 enum class StateChange
 {
     notMonitored,
-    unknown,
     removed,
     inserted
 };
@@ -323,7 +322,7 @@ class DeviceMonitor
     {
         LogMsg(Logger::Info, "[DeviceMonitor]: watch on ", device.to_path());
         devices.insert(
-            std::pair<NBDDevice, StateChange>(device, StateChange::unknown));
+            std::pair<NBDDevice, StateChange>(device, StateChange::removed));
     }
 
     StateChange getState(const NBDDevice& device)
@@ -477,9 +476,9 @@ class Process : public std::enable_shared_from_this<Process>
     const NBDDevice& dev;
 };
 
-class FsHelper
+struct UsbGadget
 {
-  protected:
+  private:
     static bool echoToFile(const fs::path& fname, const std::string& content)
     {
         std::ofstream fileWriter;
@@ -490,11 +489,7 @@ class FsHelper
         LogMsg(Logger::Debug, "echo ", content, " > ", fname);
         return true;
     }
-};
 
-struct UsbGadget : private FsHelper
-{
-  private:
     static const std::string getGadgetDirPrefix()
     {
         const std::string gadgetDirPrefix =
@@ -516,12 +511,6 @@ struct UsbGadget : private FsHelper
                ", path=", path, ", State=", static_cast<uint32_t>(change), ")");
         bool success = true;
         std::error_code ec;
-        if (change == StateChange::unknown)
-        {
-            LogMsg(Logger::Critical,
-                   "[App]: Change to unknown state is not possible");
-            return -1;
-        }
 
         const fs::path gadgetDir = getGadgetDirPrefix() + name;
         const fs::path funcMassStorageDir =
@@ -579,7 +568,7 @@ struct UsbGadget : private FsHelper
                 success = false;
             }
         }
-        // StateChange: unknown, notMonitored, inserted were handler
+        // StateChange: notMonitored, inserted were handler
         // earlier. We'll get here only for removed, or cleanup
 
         echoToFile(gadgetDir / "UDC", "");
@@ -630,25 +619,5 @@ struct UsbGadget : private FsHelper
         }
 
         return true;
-    }
-};
-
-class UdevGadget : private FsHelper
-{
-  public:
-    // Workaround for HSD18020136609: Can not mount image using Virtual media
-    // and CIFS protocol
-    // This force-triggers udev change events for nbd[0-3] devices, which
-    // prevents from disconnection on first mount event after reboot. The actual
-    // rootcause is related with kernel changes that occured between 5.10.67 and
-    // 5.14.11. This lead will continue to be investigated in order to provide
-    // proper fix.
-    static void forceUdevChange()
-    {
-        std::string changeStr = "change";
-        echoToFile("/sys/block/nbd0/uevent", changeStr);
-        echoToFile("/sys/block/nbd1/uevent", changeStr);
-        echoToFile("/sys/block/nbd2/uevent", changeStr);
-        echoToFile("/sys/block/nbd3/uevent", changeStr);
     }
 };

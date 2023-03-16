@@ -28,21 +28,8 @@ Gadget::Gadget(interfaces::MountPointStateMachine& machine,
 
 Gadget::~Gadget()
 {
-    int32_t ret = UsbGadget::configure(std::string(machine->getName()),
-                                       machine->getConfig().nbdDevice,
-                                       StateChange::removed);
-    if (ret != 0)
-    {
-        // This shouldn't ever happen, perhaps best is to restart
-        // app
-        LogMsg(Logger::Critical, machine->getName(),
-               " Some serious failure happened!");
-
-        boost::asio::post(machine->getIoc(), [& machine = *machine]() {
-            machine.emitUdevStateChangeEvent(machine.getConfig().nbdDevice,
-                                             StateChange::unknown);
-        });
-    }
+    UsbGadget::configure(std::string(machine->getName()),
+                         machine->getConfig().nbdDevice, StateChange::removed);
 }
 
 } // namespace resource
