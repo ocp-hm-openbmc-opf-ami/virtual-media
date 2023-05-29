@@ -544,16 +544,34 @@ struct UsbGadget
                 for (const auto& port : fs::directory_iterator(
                          "/sys/bus/platform/devices/1e6a0000.usb-vhub"))
                 {
-                    if (fs::is_directory(port) && !fs::is_symlink(port) &&
-                        !fs::exists(port.path() / "gadget/suspended"))
+                    const std::string portId = port.path().filename();
+
+                    if (portId.find("1e6a0000.usb-vhub:p") != std::string::npos)
                     {
-                        const std::string portId = port.path().filename();
-                        LogMsg(Logger::Debug,
-                               "Use port : ", port.path().filename());
-                        echoToFile(gadgetDir / "UDC", portId);
-                        return 0;
+                        constexpr std::string_view portDelimiter = ":p";
+                        const std::string portNumber = portId.substr(
+                            portId.find(portDelimiter) + portDelimiter.size());
+
+                        // GadgetId is port number minus 1
+                        const int gadgetId = std::stoi(portNumber) - 1;
+
+                        if (fs::is_directory(port) && !fs::is_symlink(port) &&
+                            !fs::exists(port.path() /
+                                        ("gadget." + std::to_string(gadgetId)) /
+                                        "suspended"))
+                        {
+                            LogMsg(Logger::Debug, "Use port : ", portId);
+                            echoToFile(gadgetDir / "UDC", portId);
+                            return 0;
+                        }
                     }
                 }
+            }
+            catch (std::invalid_argument& e)
+            {
+                // Got error perform cleanup
+                LogMsg(Logger::Error, "[App]: UsbGadget: ", e.what());
+                success = false;
             }
             catch (fs::filesystem_error& e)
             {
