@@ -51,6 +51,8 @@ struct BasicStateT : public BasicState
         return nullptr;
     }
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Woverloaded-virtual"
     std::unique_ptr<BasicState> handleEvent(Event event) override final
     {
         return std::visit(
@@ -59,6 +61,7 @@ struct BasicStateT : public BasicState
             },
             std::move(event));
     }
+#pragma GCC diagnostic pop
 
     std::string_view getStateName() const override final
     {
