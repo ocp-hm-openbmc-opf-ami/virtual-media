@@ -69,7 +69,7 @@ class NBDDevice
     };
 
     NBDDevice() = default;
-    NBDDevice(Value v) : value(v){};
+    NBDDevice(Value v) : value(v) {};
     explicit NBDDevice(const char* nbdName)
     {
         if (nbdName != nullptr)
@@ -350,8 +350,7 @@ class Process : public std::enable_shared_from_this<Process>
   public:
     Process(boost::asio::io_context& ioc, std::string_view name,
             const std::string& app, const NBDDevice& dev) :
-        ioc(ioc),
-        pipe(ioc), name(name), app(app), dev(dev)
+        ioc(ioc), pipe(ioc), name(name), app(app), dev(dev)
     {
     }
 
@@ -490,11 +489,9 @@ struct UsbGadget
         return true;
     }
 
-    static const std::string getGadgetDirPrefix()
+    static constexpr const char* getGadgetDirPrefix()
     {
-        const std::string gadgetDirPrefix =
-            "/sys/kernel/config/usb_gadget/mass-storage-";
-        return gadgetDirPrefix;
+        return "/sys/kernel/config/usb_gadget/mass-storage-";
     }
 
   public:

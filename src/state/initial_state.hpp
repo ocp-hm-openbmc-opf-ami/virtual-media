@@ -9,6 +9,7 @@
 #include <sdbusplus/asio/connection.hpp>
 #include <string>
 #include <system_error>
+#include <variant>
 
 struct InitialState : public BasicStateT<InitialState>
 {
@@ -189,6 +190,20 @@ struct InitialState : public BasicStateT<InitialState>
                 return static_cast<int>(
                     config.remainingInactivityTimeout.count());
             });
+
+        iface->register_property<bool>(
+            "VerifyCertificate", bool(true),
+            [&config =
+                 machine.getConfig()]([[maybe_unused]] const bool& req,
+                                      [[maybe_unused]] bool& property) -> int {
+                config.verifyCertificate = req;
+                return 1;
+            },
+            [&config =
+                 machine.getConfig()]([[maybe_unused]] const bool& property) {
+                return config.verifyCertificate;
+            });
+
         iface->initialize();
     }
 
@@ -230,7 +245,7 @@ struct InitialState : public BasicStateT<InitialState>
                            getObjectPath(machine), machine.getName());
 
                     interfaces::MountPointStateMachine::Target target = {
-                        imgUrl, rw, nullptr, nullptr};
+                        std::move(imgUrl), rw, nullptr, nullptr};
 
                     if (std::holds_alternative<unix_fd>(fd))
                     {
