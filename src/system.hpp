@@ -226,96 +226,100 @@ class DeviceMonitor
     template <typename DeviceChangeStateCb>
     void run(DeviceChangeStateCb callback)
     {
-        boost::asio::spawn(ioc, [this,
-                                 callback](boost::asio::yield_context yield) {
-            boost::system::error_code ec;
-            while (1)
-            {
-                monitorSd.async_wait(
-                    boost::asio::posix::stream_descriptor::wait_read,
-                    yield[ec]);
-
-                std::unique_ptr<udev::udev_device, udev::deviceDeleter> device =
-                    std::unique_ptr<udev::udev_device, udev::deviceDeleter>(
-                        udev::udev_monitor_receive_device(monitor.get()));
-                if (device)
+        boost::asio::spawn(
+            ioc,
+            [this, callback](boost::asio::yield_context yield) {
+                boost::system::error_code ec;
+                while (1)
                 {
-                    const char* devAction =
-                        udev_device_get_action(device.get());
-                    if (devAction == nullptr)
-                    {
-                        LogMsg(Logger::Error,
-                               "[DeviceMonitor]: Received NULL action.");
-                        continue;
-                    }
-                    if (strcmp(devAction, "change") != 0)
-                    {
-                        continue;
-                    }
+                    monitorSd.async_wait(
+                        boost::asio::posix::stream_descriptor::wait_read,
+                        yield[ec]);
 
-                    const char* sysname = udev_device_get_sysname(device.get());
-                    if (sysname == nullptr)
+                    std::unique_ptr<udev::udev_device, udev::deviceDeleter>
+                        device = std::unique_ptr<udev::udev_device,
+                                                 udev::deviceDeleter>(
+                            udev::udev_monitor_receive_device(monitor.get()));
+                    if (device)
                     {
-                        LogMsg(Logger::Error,
-                               "[DeviceMonitor]: Received NULL sysname.");
-                        continue;
-                    }
+                        const char* devAction =
+                            udev_device_get_action(device.get());
+                        if (devAction == nullptr)
+                        {
+                            LogMsg(Logger::Error,
+                                   "[DeviceMonitor]: Received NULL action.");
+                            continue;
+                        }
+                        if (strcmp(devAction, "change") != 0)
+                        {
+                            continue;
+                        }
 
-                    NBDDevice nbdDevice(sysname);
-                    if (!nbdDevice)
-                    {
-                        continue;
-                    }
+                        const char* sysname =
+                            udev_device_get_sysname(device.get());
+                        if (sysname == nullptr)
+                        {
+                            LogMsg(Logger::Error,
+                                   "[DeviceMonitor]: Received NULL sysname.");
+                            continue;
+                        }
 
-                    auto monitoredDevice = devices.find(nbdDevice);
-                    if (monitoredDevice == devices.cend())
-                    {
-                        continue;
-                    }
+                        NBDDevice nbdDevice(sysname);
+                        if (!nbdDevice)
+                        {
+                            continue;
+                        }
 
-                    const char* sizeStr =
-                        udev_device_get_sysattr_value(device.get(), "size");
-                    if (sizeStr == nullptr)
-                    {
-                        LogMsg(Logger::Error,
-                               "[DeviceMonitor]: Received NULL size.");
-                        continue;
-                    }
+                        auto monitoredDevice = devices.find(nbdDevice);
+                        if (monitoredDevice == devices.cend())
+                        {
+                            continue;
+                        }
 
-                    uint64_t size = 0;
-                    try
-                    {
-                        size = std::stoul(sizeStr, 0, 0);
-                    }
-                    catch (const std::exception& e)
-                    {
-                        LogMsg(Logger::Error,
-                               "[DeviceMonitor]: Could not convert "
-                               "size "
-                               "to integer.");
-                        continue;
-                    }
-                    if (size > 0 &&
-                        monitoredDevice->second != StateChange::inserted)
-                    {
-                        LogMsg(Logger::Info,
-                               "[DeviceMonitor]: ", nbdDevice.to_path(),
-                               " inserted.");
-                        monitoredDevice->second = StateChange::inserted;
-                        callback(nbdDevice, StateChange::inserted);
-                    }
-                    else if (size == 0 &&
-                             monitoredDevice->second != StateChange::removed)
-                    {
-                        LogMsg(Logger::Info,
-                               "[DeviceMonitor]: ", nbdDevice.to_path(),
-                               " removed.");
-                        monitoredDevice->second = StateChange::removed;
-                        callback(nbdDevice, StateChange::removed);
+                        const char* sizeStr =
+                            udev_device_get_sysattr_value(device.get(), "size");
+                        if (sizeStr == nullptr)
+                        {
+                            LogMsg(Logger::Error,
+                                   "[DeviceMonitor]: Received NULL size.");
+                            continue;
+                        }
+
+                        uint64_t size = 0;
+                        try
+                        {
+                            size = std::stoul(sizeStr, 0, 0);
+                        }
+                        catch (const std::exception& e)
+                        {
+                            LogMsg(Logger::Error,
+                                   "[DeviceMonitor]: Could not convert "
+                                   "size "
+                                   "to integer.");
+                            continue;
+                        }
+                        if (size > 0 &&
+                            monitoredDevice->second != StateChange::inserted)
+                        {
+                            LogMsg(Logger::Info,
+                                   "[DeviceMonitor]: ", nbdDevice.to_path(),
+                                   " inserted.");
+                            monitoredDevice->second = StateChange::inserted;
+                            callback(nbdDevice, StateChange::inserted);
+                        }
+                        else if (size == 0 && monitoredDevice->second !=
+                                                  StateChange::removed)
+                        {
+                            LogMsg(Logger::Info,
+                                   "[DeviceMonitor]: ", nbdDevice.to_path(),
+                                   " removed.");
+                            monitoredDevice->second = StateChange::removed;
+                            callback(nbdDevice, StateChange::removed);
+                        }
                     }
                 }
-            }
-        });
+            },
+            {});
     }
 
     void addDevice(const NBDDevice& device)
@@ -371,94 +375,100 @@ class Process : public std::enable_shared_from_this<Process>
             return false;
         }
 
-        boost::asio::spawn(ioc, [this, self = shared_from_this(),
-                                 onExit = std::move(onExit)](
-                                    boost::asio::yield_context yield) {
-            boost::system::error_code bec;
-            std::string line;
-            boost::asio::dynamic_string_buffer buffer{line};
-            LogMsg(Logger::Info,
-                   "[Process]: Start reading console from nbd-client");
-            while (1)
-            {
-                auto x = boost::asio::async_read_until(pipe, std::move(buffer),
-                                                       '\n', yield[bec]);
-                auto lineBegin = line.begin();
-                while (lineBegin != line.end())
+        boost::asio::spawn(
+            ioc,
+            [this, self = shared_from_this(),
+             onExit = std::move(onExit)](boost::asio::yield_context yield) {
+                boost::system::error_code bec;
+                std::string line;
+                boost::asio::dynamic_string_buffer buffer{line};
+                LogMsg(Logger::Info,
+                       "[Process]: Start reading console from nbd-client");
+                while (1)
                 {
-                    auto lineEnd = find(lineBegin, line.end(), '\n');
-                    LogMsg(Logger::Info, "[Process]: (", name, ") ",
-                           std::string(lineBegin, lineEnd));
-                    if (lineEnd == line.end())
+                    auto x = boost::asio::async_read_until(
+                        pipe, std::move(buffer), '\n', yield[bec]);
+                    auto lineBegin = line.begin();
+                    while (lineBegin != line.end())
                     {
+                        auto lineEnd = find(lineBegin, line.end(), '\n');
+                        LogMsg(Logger::Info, "[Process]: (", name, ") ",
+                               std::string(lineBegin, lineEnd));
+                        if (lineEnd == line.end())
+                        {
+                            break;
+                        }
+                        lineBegin = lineEnd + 1;
+                    }
+
+                    buffer.consume(x);
+                    if (bec)
+                    {
+                        LogMsg(Logger::Info, "[Process]: (", name,
+                               ") Loop Error: ", bec);
                         break;
                     }
-                    lineBegin = lineEnd + 1;
                 }
-
-                buffer.consume(x);
-                if (bec)
+                LogMsg(Logger::Info, "[Process]: Exiting from COUT Loop");
+                // The process shall be dead, or almost here, give it a chance
+                LogMsg(Logger::Debug,
+                       "[Process]: Waiting process to finish normally");
+                boost::asio::steady_timer timer(ioc);
+                int32_t waitCnt = 20;
+                while (child.running() && waitCnt > 0)
                 {
-                    LogMsg(Logger::Info, "[Process]: (", name,
-                           ") Loop Error: ", bec);
-                    break;
+                    boost::system::error_code ignored_ec;
+                    timer.expires_from_now(std::chrono::milliseconds(100));
+                    timer.async_wait(yield[ignored_ec]);
+                    waitCnt--;
                 }
-            }
-            LogMsg(Logger::Info, "[Process]: Exiting from COUT Loop");
-            // The process shall be dead, or almost here, give it a chance
-            LogMsg(Logger::Debug,
-                   "[Process]: Waiting process to finish normally");
-            boost::asio::steady_timer timer(ioc);
-            int32_t waitCnt = 20;
-            while (child.running() && waitCnt > 0)
-            {
-                boost::system::error_code ignored_ec;
-                timer.expires_from_now(std::chrono::milliseconds(100));
-                timer.async_wait(yield[ignored_ec]);
-                waitCnt--;
-            }
-            if (child.running())
-            {
-                child.terminate();
-            }
+                if (child.running())
+                {
+                    child.terminate();
+                }
 
-            child.wait();
-            LogMsg(Logger::Info, "[Process]: running: ", child.running(),
-                   " EC: ", child.exit_code(),
-                   " Native: ", child.native_exit_code());
+                child.wait();
+                LogMsg(Logger::Info, "[Process]: running: ", child.running(),
+                       " EC: ", child.exit_code(),
+                       " Native: ", child.native_exit_code());
 
-            onExit(child.exit_code());
-        });
+                onExit(child.exit_code());
+            },
+            {});
         return true;
     }
 
     template <class OnTerminateCb>
     void stop(OnTerminateCb&& onTerminate)
     {
-        boost::asio::spawn(ioc, [this, self = shared_from_this(),
-                                 onTerminate = std::move(onTerminate)](
-                                    boost::asio::yield_context yield) {
-            // The Good
-            dev.disconnect();
+        boost::asio::spawn(
+            ioc,
+            [this, self = shared_from_this(),
+             onTerminate =
+                 std::move(onTerminate)](boost::asio::yield_context yield) {
+                // The Good
+                dev.disconnect();
 
-            // The Ugly (but required)
-            boost::asio::steady_timer timer(ioc);
-            int32_t waitCnt = 20;
-            while (child.running() && waitCnt > 0)
-            {
-                boost::system::error_code ignored_ec;
-                timer.expires_from_now(std::chrono::milliseconds(100));
-                timer.async_wait(yield[ignored_ec]);
-                waitCnt--;
-            }
-            if (child.running())
-            {
-                LogMsg(Logger::Info, "[Process] Terminate if process doesnt "
-                                     "want to exit nicely");
-                child.terminate();
-                onTerminate();
-            }
-        });
+                // The Ugly (but required)
+                boost::asio::steady_timer timer(ioc);
+                int32_t waitCnt = 20;
+                while (child.running() && waitCnt > 0)
+                {
+                    boost::system::error_code ignored_ec;
+                    timer.expires_from_now(std::chrono::milliseconds(100));
+                    timer.async_wait(yield[ignored_ec]);
+                    waitCnt--;
+                }
+                if (child.running())
+                {
+                    LogMsg(Logger::Info,
+                           "[Process] Terminate if process doesnt "
+                           "want to exit nicely");
+                    child.terminate();
+                    onTerminate();
+                }
+            },
+            {});
     }
 
     std::string application()
