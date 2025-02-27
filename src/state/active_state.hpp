@@ -57,10 +57,10 @@ struct ActiveState : public BasicStateT<ActiveState>
                     Configuration::inactivityTimeout - timeSinceLastAccess;
             }
 
-            timer.expires_from_now(std::chrono::seconds(1));
+            timer.expires_after(std::chrono::seconds(1));
             timer.async_wait(handler);
         };
-        timer.expires_from_now(std::chrono::seconds(1));
+        timer.expires_after(std::chrono::seconds(1));
         timer.async_wait(handler);
 
         return nullptr;

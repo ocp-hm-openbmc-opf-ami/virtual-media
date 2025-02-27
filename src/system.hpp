@@ -418,7 +418,7 @@ class Process : public std::enable_shared_from_this<Process>
                 while (child.running() && waitCnt > 0)
                 {
                     boost::system::error_code ignored_ec;
-                    timer.expires_from_now(std::chrono::milliseconds(100));
+                    timer.expires_after(std::chrono::milliseconds(100));
                     timer.async_wait(yield[ignored_ec]);
                     waitCnt--;
                 }
@@ -455,7 +455,7 @@ class Process : public std::enable_shared_from_this<Process>
                 while (child.running() && waitCnt > 0)
                 {
                     boost::system::error_code ignored_ec;
-                    timer.expires_from_now(std::chrono::milliseconds(100));
+                    timer.expires_after(std::chrono::milliseconds(100));
                     timer.async_wait(yield[ignored_ec]);
                     waitCnt--;
                 }
