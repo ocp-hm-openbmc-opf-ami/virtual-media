@@ -226,7 +226,7 @@ class DeviceMonitor
     template <typename DeviceChangeStateCb>
     void run(DeviceChangeStateCb callback)
     {
-        boost::asio::spawn(
+        (void)boost::asio::spawn(
             ioc,
             [this, callback](boost::asio::yield_context yield) {
                 boost::system::error_code ec;
@@ -375,7 +375,7 @@ class Process : public std::enable_shared_from_this<Process>
             return false;
         }
 
-        boost::asio::spawn(
+        (void)boost::asio::spawn(
             ioc,
             [this, self = shared_from_this(),
              onExit = std::move(onExit)](boost::asio::yield_context yield) {
@@ -441,7 +441,7 @@ class Process : public std::enable_shared_from_this<Process>
     template <class OnTerminateCb>
     void stop(OnTerminateCb&& onTerminate)
     {
-        boost::asio::spawn(
+        (void)boost::asio::spawn(
             ioc,
             [this, self = shared_from_this(),
              onTerminate =
