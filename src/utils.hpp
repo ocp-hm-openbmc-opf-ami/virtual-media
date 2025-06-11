@@ -334,7 +334,7 @@ class NotificationWrapper
     {
         LogMsg(Logger::Debug, "Notification initiated");
         started = true;
-        timer->expires_from_now(duration);
+        timer->expires_after(duration);
         timer->async_wait([this, handler{std::move(handler)}](
                               const boost::system::error_code& ec) {
             started = false;

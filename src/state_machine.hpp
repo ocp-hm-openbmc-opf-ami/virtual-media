@@ -109,7 +109,7 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
         }
     }
 
-    virtual void
+    void
         notificationInitialize(std::shared_ptr<sdbusplus::asio::connection> con,
                                const std::string& svc, const std::string& iface,
                                const std::string& name) override
@@ -122,7 +122,7 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
         completionNotification = std::make_unique<utils::NotificationWrapper>(
             std::move(signal), std::move(timer));
     }
-    void notificationStart()
+    void notificationStart() override
     {
         auto notificationHandler = [this](const boost::system::error_code& ec) {
             if (ec == boost::system::errc::operation_canceled)
@@ -146,7 +146,7 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
                 5));
     }
 
-    virtual void notify(const std::error_code& ec = {}) override
+    void notify(const std::error_code& ec = {}) override
     {
         completionNotification->notify(ec);
     }
@@ -157,6 +157,7 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
     std::unique_ptr<utils::NotificationWrapper> completionNotification;
 
     std::optional<Target> target;
+    bool certificateVerification{true};
     std::unique_ptr<BasicState> state = std::make_unique<InitialState>(*this);
     int exitCode = -1;
 };

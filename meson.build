@@ -4,15 +4,15 @@ project(
     default_options: [
         'warning_level=3',
         'werror=true',
-        'cpp_std=c++20',
+        'cpp_std=c++23',
         'cpp_rtti=false',
     ],
     license: 'Apache-2.0',
     version: '0.1',
 )
 
-if get_option('cpp_std') != 'c++20'
-    error('This project requires c++20 support')
+if get_option('cpp_std') != 'c++23'
+    error('This project requires c++23 support')
 endif
 
 cxx = meson.get_compiler('cpp')

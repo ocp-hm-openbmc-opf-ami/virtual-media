@@ -41,6 +41,7 @@ class Configuration
         std::optional<int> timeout;
         std::optional<int> blocksize;
         std::chrono::seconds remainingInactivityTimeout;
+        bool verifyCertificate{true};
         Mode mode;
 
         static std::vector<std::string> toArgs(const MountPoint& mp)

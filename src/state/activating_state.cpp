@@ -13,7 +13,7 @@
 #include <boost/process.hpp>
 #include <boost/system/detail/error_code.hpp>
 #include <filesystem>
-#include <iostream>
+#include <format>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <sdbusplus/asio/connection.hpp>
@@ -267,6 +267,7 @@ std::unique_ptr<resource::Process>
         "curl",
         // ... to mount http resource at url
         "url=" + url,
+        std::format("sslverify={:s}", machine.getConfig().verifyCertificate),
         // custom OpenBMC path for CA
         "cainfo=", "capath=/etc/ssl/certs/authority", "ssl-version=tlsv1.2",
         "followlocation=false",
