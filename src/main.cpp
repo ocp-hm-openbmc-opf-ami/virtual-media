@@ -2,6 +2,7 @@
 #include "logger.hpp"
 #include "state_machine.hpp"
 #include "system.hpp"
+#include "vm_interface.hpp"
 
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -29,7 +30,7 @@ class App
     App(boost::asio::io_context& ioc, const Configuration& config,
         sd_bus* custom_bus = nullptr) :
         ioc(ioc),
-        devMonitor(ioc), config(config)
+        devMonitor(ioc), config(config), dbusMonitor()
     {
         if (!custom_bus)
         {
@@ -60,6 +61,14 @@ class App
         });
     }
 
+    void run()
+    {
+        auto sessionMatch = dbusMonitor.sessionMonitor(bus);
+        vm::Interface interface(objServer);
+        interface.addInterfaces();
+        ioc.run();
+    }
+
   private:
     boost::container::flat_map<std::string,
                                std::shared_ptr<MountPointStateMachine>>
@@ -70,6 +79,7 @@ class App
     std::shared_ptr<sdbusplus::server::manager::manager> objManager;
     DeviceMonitor devMonitor;
     const Configuration& config;
+    DbusMonitor dbusMonitor;
 };
 
 int main()
@@ -109,8 +119,7 @@ int main()
 #endif
     sd_bus_default_system(&b);
     App app(ioc, config, b);
-
-    ioc.run();
+    app.run();
 
     return 0;
 }

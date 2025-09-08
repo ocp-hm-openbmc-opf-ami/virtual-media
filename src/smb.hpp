@@ -3,8 +3,6 @@
 #include "logger.hpp"
 #include "utils.hpp"
 
-#include <sys/mount.h>
-
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -23,10 +21,11 @@ class SmbShare
     {
         LogMsg(Logger::Debug, "Trying to mount remote : ", remote);
 
-        const std::string params = "sec=ntlmsspi,seal";
-        const std::string perm = rw ? "rw" : "ro";
-        std::string options = params + "," + perm;
-        std::string credentialsOpt;
+        std::string options = "sec=ntlmsspi,seal,soft,cache=none,retrans=1,echo_interval=1";
+        std::string credentialsOpt = "";
+        const std::string fs = "cifs";
+        std::string versionOpt = ",vers=3.1.1";
+        unsigned long flags = (rw ? 0 : MS_RDONLY);
 
         if (!credentials)
         {
@@ -47,14 +46,15 @@ class SmbShare
         }
         options += "," + credentialsOpt;
 
-        std::string versionOpt = "vers=3.1.1";
-        auto ec = mountWithSmbVers(remote, options, versionOpt);
+        auto ec =
+            utils::safeMount(remote, mountDir, fs, flags, options + versionOpt);
 
         if (ec)
         {
             // vers=3 will negotiate max version from 3.02 and 3.0
-            versionOpt = "vers=3";
-            ec = mountWithSmbVers(remote, options, versionOpt);
+            versionOpt = ",vers=3";
+            ec = utils::safeMount(remote, mountDir, fs, flags,
+                                  options + versionOpt);
         }
 
         utils::secureCleanup(options);
@@ -74,23 +74,5 @@ class SmbShare
     bool validateUsername(const std::string& username)
     {
         return username.find(',') == std::string::npos;
-    }
-
-    int mountWithSmbVers(const fs::path& remote, std::string options,
-                         const std::string& version)
-    {
-        options += "," + version;
-
-        auto ec = ::mount(remote.c_str(), mountDir.c_str(), "cifs", 0,
-                          options.c_str());
-        utils::secureCleanup(options);
-
-        if (ec)
-        {
-            LogMsg(Logger::Info, "Mount failed for ", version,
-                   " with ec = ", ec, " errno = ", errno);
-        }
-
-        return ec;
     }
 };

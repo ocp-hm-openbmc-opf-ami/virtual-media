@@ -21,9 +21,25 @@ Gadget::Gadget(interfaces::MountPointStateMachine& machine,
                StateChange devState) :
     machine(&machine)
 {
-    status = UsbGadget::configure(
-        std::string(machine.getName()), machine.getConfig().nbdDevice, devState,
-        machine.getTarget() ? machine.getTarget()->rw : false);
+    try
+    {
+        status = UsbGadget::configure(
+            std::string(machine.getName()), machine.getConfig().nbdDevice,
+            devState, machine.getTarget() ? machine.getTarget()->rw : false);
+
+        if (status == -1)
+        {
+            LogMsg(Logger::Error,
+                   "Image size too small, skipping gadget configuration for: ",
+                   machine.getName());
+        }
+    }
+    catch (const std::exception& e)
+    {
+        LogMsg(Logger::Error, "Failed to configure USB gadget for ",
+               machine.getName(), ": ", e.what());
+        status = -1;
+    }
 }
 
 Gadget::~Gadget()

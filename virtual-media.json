@@ -33,5 +33,7 @@
             "Timeout": 90,
             "BlockSize": 512
         }
-    }
+    },
+    "RetryCount": 3,
+    "RetryInterval": 15
 }

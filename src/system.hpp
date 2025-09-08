@@ -2,6 +2,9 @@
 
 #include "logger.hpp"
 
+#include <sys/prctl.h>
+#include <time.h>
+
 #include <algorithm>
 #include <boost/asio.hpp>
 #include <boost/asio/spawn.hpp>
@@ -10,8 +13,64 @@
 #include <filesystem>
 #include <fstream>
 #include <sdbusplus/asio/object_server.hpp>
-
+#include <sdbusplus/bus.hpp>
+#include <sdbusplus/bus/match.hpp>
+#include <string>
+#include <variant>
+#include <sys/statfs.h>
+#include <thread>
+#include <chrono>
+#include <atomic>
+#include <cstdlib>
+#include <sdbusplus/bus.hpp>
+#include <sdbusplus/exception.hpp>
+#include <variant>
+#include <linux/fs.h>
+#define USB_VMEDIA_NAME_SIZE 29
+static std::map<std::string, std::atomic<bool>> retryThreadCreatedMap;
+static std::atomic<bool> is_reconnecting;
 namespace fs = std::filesystem;
+#include "credentials.hpp"
+extern std::shared_ptr<Credentials> creds[2]; 
+using DbusVariantType = std::variant<
+    std::tuple<bool,std::string>,
+    std::vector<std::tuple<std::string, bool, bool, std::string>>,
+    std::tuple<bool, uint8_t, std::string>,	
+    std::vector<std::tuple<std::string, std::string, std::string>>,
+    std::vector<std::string>,
+    std::vector<double>,
+    std::string,
+    int64_t,
+    uint64_t,
+    double,
+    int32_t,
+    uint32_t,
+    int16_t,
+    uint16_t,
+    uint8_t,
+    bool,
+    sdbusplus::message::unix_fd,
+    std::vector<uint32_t>,
+    std::vector<uint16_t>,
+    sdbusplus::message::object_path,
+    std::tuple<uint64_t, std::vector<std::tuple<std::string, double, uint64_t>>>,
+    std::vector<sdbusplus::message::object_path>,
+    std::vector<std::tuple<std::string, std::string>>,
+    std::vector<std::tuple<uint32_t, bool, std::string>>,
+    std::vector<std::tuple<uint32_t, std::vector<uint32_t>>>,
+    std::vector<std::tuple<uint32_t, size_t>>,
+    std::vector<std::tuple<
+      std::vector<std::tuple<sdbusplus::message::object_path, std::string>>,
+      std::string, std::string, uint64_t>>
+ >;
+// Create an instance of the variant type
+
+#define POWER_SAVE_MODE_ENABLE 1
+#define POWER_SAVE_MODE_DISABLE 0
+
+/* Map to keep track of Active session and bind [Slot_N - sessionID] */
+using activesessionmap = std::map<std::string, uint8_t>;
+static activesessionmap activeSessons;
 
 namespace udev
 {
@@ -485,18 +544,593 @@ class Process : public std::enable_shared_from_this<Process>
     const NBDDevice& dev;
 };
 
+#define DEFAULT_SID 0         // Default SID (Session ID)
+#define DEFAULT_IP "~"        // Default IP address
+#define DEFAULT_USER "local"  // Default user
+#define VMEDIA 2              // vMedia Session type
+#define PRIV_LEVEL_ADMIN 0x04 // Privilege level for admin
+#define DEFAULT_USER_ID 0     // Default user ID
+#define LOGOUT 0x01           // Reson for session unregister
+
+#define DBUS_PROPERTIES_INTERFACE "org.freedesktop.DBus.Properties"
+
+const std::string sessMgrService = "xyz.openbmc_project.SessionManager";
+const std::string sessMgrObjPath = "/xyz/openbmc_project/SessionManager";
+const std::string sessMgrIface = "xyz.openbmc_project.SessionManager";
+const std::string sessMgrVmediaIface =
+    "xyz.openbmc_project.SessionManager.Vmedia";
+
+using sessionInfo = std::tuple<uint8_t, std::string, std::string, uint8_t,
+                               uint8_t, uint8_t, std::string>;
+using sessionList = std::vector<sessionInfo>;
+using propertyVariant = std::variant<sessionList>;
+
+/* @brief Method to determine mount method type[console/remote] */
+static std::string mountMethod(const std::string& Slot)
+{
+
+    if (Slot == "Slot_0" || Slot == "Slot_1")
+    {
+        return "console";
+    }
+    else if (Slot == "Slot_2" || Slot == "Slot_3")
+    {
+        return "remote";
+    }
+
+    return " ";
+}
+static void unMount(std::string Slot)
+{
+    std::string vMediaService = "xyz.openbmc_project.VirtualMedia";
+    std::string obj = "/xyz/openbmc_project/";
+    std::string iface = "xyz.openbmc_project.VirtualMedia.";
+
+    if (Slot == "Slot_0" || Slot == "Slot_1")
+    {
+        obj = obj + "VirtualMedia/Proxy/" + Slot;
+        iface = iface + "Proxy";
+    }
+    else
+    {
+        obj = obj + "VirtualMedia/Legacy/" + Slot;
+        iface = iface + "Legacy";
+    }
+
+    auto umnt = sdbusplus::bus::new_system();
+    auto msgumnt = umnt.new_method_call(vMediaService.c_str(), obj.c_str(),
+                                        iface.c_str(), "Unmount");
+
+    auto reply = umnt.call(msgumnt);
+    if (!reply)
+    {
+        LogMsg(Logger::Error, " Unmount call on ", Slot, " Failed.");
+        return;
+    }
+
+    LogMsg(Logger::Info, " Unmount call on ", Slot, " Successful.");
+}
+/*
+ * @brief Class to monitor Dbus
+ */
+
+class DbusMonitor
+{
+  public:
+    DbusMonitor() = default;
+    ~DbusMonitor() = default;
+    DbusMonitor(const DbusMonitor&) = delete;
+    DbusMonitor& operator=(const DbusMonitor&) = delete;
+    DbusMonitor(DbusMonitor&&) = delete;
+    DbusMonitor& operator=(DbusMonitor&&) = delete;
+
+    std::string findKeyForValue(const activesessionmap& map, uint8_t value)
+    {
+        for (const auto& pair : map)
+        {
+            if (pair.second == value)
+            {
+                // Return the key corresponding to the value
+                return pair.first;
+            }
+        }
+        // Return "INVALID" if the value is not found
+        return "INVALID";
+    }
+
+    std::vector<uint8_t>
+        findRemovedSessionIDs(const std::vector<uint8_t>& activeSessionIDs,
+                              const std::vector<uint8_t>& updatedSessionIDs)
+    {
+        std::vector<uint8_t> removedSessionIDs;
+
+        // Sort the vectors to perform set difference operation
+        std::vector<uint8_t> sortedActiveSessionIDs = activeSessionIDs;
+        std::vector<uint8_t> sortedUpdatedSessionIDs = updatedSessionIDs;
+        std::sort(sortedActiveSessionIDs.begin(), sortedActiveSessionIDs.end());
+        std::sort(sortedUpdatedSessionIDs.begin(),
+                  sortedUpdatedSessionIDs.end());
+
+        // Find missing session IDs using set difference operation
+        std::set_difference(
+            sortedActiveSessionIDs.begin(), sortedActiveSessionIDs.end(),
+            sortedUpdatedSessionIDs.begin(), sortedUpdatedSessionIDs.end(),
+            std::back_inserter(removedSessionIDs));
+
+        return removedSessionIDs;
+    }
+
+    void handleSessions(const sessionList& list)
+    {
+        std::vector<uint8_t> updatedSessionIDs;
+        std::vector<uint8_t> activeSessionIDs;
+        std::vector<uint8_t> removedSessionIDs;
+        std::string Slot;
+
+        for (const auto& tuple : list)
+        {
+            uint8_t sessionID = std::get<0>(tuple);
+            updatedSessionIDs.push_back(sessionID);
+        }
+
+        for (const auto& pair : activeSessons)
+        {
+            activeSessionIDs.push_back(pair.second);
+        }
+
+        removedSessionIDs =
+            findRemovedSessionIDs(activeSessionIDs, updatedSessionIDs);
+        for (uint8_t rmvID : removedSessionIDs)
+        {
+            LogMsg(Logger::Info, "Removed Session ID: ", rmvID);
+
+            Slot = findKeyForValue(activeSessons, rmvID);
+
+            if (Slot != "INVALID")
+            {
+                LogMsg(Logger::Info, "associated Slot: ", Slot);
+                activeSessons.erase(Slot);
+
+                /*
+                 *  Child process is spawned to make this operation non-blocking
+                 *  and avoid service restart.
+                 */
+                if (fork() == 0)
+                {
+                    unMount(Slot);
+                    exit(0);
+                }
+            }
+        }
+    }
+
+    sdbusplus::bus::match_t
+        sessionMonitor(std::shared_ptr<sdbusplus::asio::connection> conn)
+    {
+        auto sessionCallback = [&conn, this](sdbusplus::message_t& msg) {
+            try
+            {
+                sessionList updatedlist;
+                std::string interfaceName;
+
+                boost::container::flat_map<std::string, propertyVariant>
+                    sessionProperty;
+                msg.read(interfaceName, sessionProperty);
+
+                LogMsg(Logger::Debug, "interface name: ", interfaceName);
+
+                if (interfaceName == sessMgrVmediaIface)
+                {
+                    for (const auto& entry : sessionProperty)
+                    {
+                        LogMsg(Logger::Debug, "Property: ", entry.first);
+
+                        if (entry.first == "VmediaSessionInfo")
+                        {
+                            updatedlist = std::get<sessionList>(entry.second);
+                            handleSessions(updatedlist);
+                        }
+                    }
+                }
+            }
+            catch (const std::exception& e)
+            {
+                LogMsg(Logger::Error,
+                       "[sessionMonitor]Error handling Dbus signal ERROR= %s ",
+                       e.what());
+            }
+        };
+
+        sdbusplus::bus::match_t sessionMatcher(
+            static_cast<sdbusplus::bus::bus&>(*conn),
+            "type='signal',member='PropertiesChanged',path='" + sessMgrObjPath +
+                "',arg0namespace='" + sessMgrVmediaIface + "'",
+            std::move(sessionCallback));
+
+        return sessionMatcher;
+    }
+};
+
+inline void powerSaveMode(int status)
+{
+    if ((status == 0) || (status == 1))
+    {
+        try
+        {
+            auto bus = sdbusplus::bus::new_system();
+            auto methodCall = bus.new_method_call(
+                "xyz.openbmc_project.Settings",
+                "/xyz/openbmc_project/logging/settings",
+                "xyz.openbmc_project.USB", "SetUSBPowerSaveMode");
+            methodCall.append(status);
+            bus.call(methodCall);
+        }
+
+        catch (const sdbusplus::exception::SdBusError& e)
+        {
+            LogMsg(Logger::Error,"D-Bus call Failed ERROR=%s", e.what());
+            return;
+        }
+
+        catch (const std::exception& e)
+        {
+            LogMsg(Logger::Error,"Error handling for powersavemode=%s", e.what());
+            return;
+        }
+    }
+}
+
+/* Detect image type (CD/HD) */
+inline int detectImageType(const std::string& filePath)
+{
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file)
+    {
+        LogMsg(Logger::Error, "Failed to open file: ", filePath);
+        return -1;
+    }
+
+    file.seekg(0x8001);
+    char buffer[5] = {0};
+    if (!file.read(buffer, 5))
+    {
+        LogMsg(Logger::Error, "Failed to read from file: ", filePath);
+        return -1;
+    }
+
+    return (std::string_view(buffer, 5) == "CD001") ? 1 : 0;
+}
+
+/* Returns slot number if ejected, -1 otherwise */
+static int eject_status(const std::string& filePath)
+{
+    int slotNumber = -1;
+    std::ifstream file(filePath);
+
+    /* check if file is empty */
+    if (file.peek() == std::ifstream::traits_type::eof())
+    {
+        // Extract the slot number from the file path
+        for (char c : filePath)
+        {
+            if (isdigit(c))
+            {
+                slotNumber = c - '0';
+                break;
+            }
+        }
+    }
+    file.close();
+    return slotNumber;
+}
+inline std::string getPathWithoutFileName(const std::string& path) {
+    size_t pos = path.find_last_of("/\\"); // Find last occurrence of '/' or '\'
+    if (pos != std::string::npos) {
+        return path.substr(0, pos + 1); // Return substring up to and including the last '/'
+    }
+    return ""; // If no delimiter found, return empty string
+}
+
+inline int isSamePath()
+{
+    if((creds[0] != NULL) && (creds[1] != NULL)){
+        std::string url_slot2  = getPathWithoutFileName(creds[0]->getUrl());
+        std::string url_slot3  = getPathWithoutFileName(creds[1]->getUrl());
+
+        if (url_slot2 == url_slot3) {
+            return 1;
+        } else {
+            return -1;
+        }
+    }
+    else
+    {
+        return 0;
+    }
+    
+}
+inline int isMountedPathAccessible(const std::string& path, int timeoutSeconds) {
+    std::atomic<int> isStatfsDone(0); // Unique atomic flag for each thread
+
+    std::thread statfsThread([&isStatfsDone, path]() {
+        struct statfs sb;
+        int ret = statfs(path.c_str(), &sb);
+        if (ret == -1) {
+            isStatfsDone = -1; // Path not accessible
+        } else {
+            isStatfsDone = 1;  // Accessible
+        }
+    });
+
+    for (int i = 0; i < timeoutSeconds; ++i) {
+        if (isStatfsDone != 0) {  // Check if statfs is done
+            statfsThread.join();
+            return isStatfsDone; // Return accessible state
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+
+    if (isStatfsDone == 0) {
+        std::cerr << "Error: statfs() call timed out! for Path " << path << std::endl;
+        statfsThread.detach();
+        return false;
+    }
+
+    return true;
+}
+static bool isFileAccessible(const std::string& path) {
+    return fs::exists(path); // Check if the file exists
+}
+static bool getActiveStatus(const std::string& objectPath) {
+    auto bus = sdbusplus::bus::new_system();
+    try {
+        // Construct the method call message
+        sdbusplus::message::message reply = bus.new_method_call(
+            "xyz.openbmc_project.VirtualMedia",
+            objectPath.c_str(),
+            "org.freedesktop.DBus.Properties",
+            "Get");
+        reply.append("xyz.openbmc_project.VirtualMedia.Process", "Active");
+
+        // Prepare a variant to read the Active status
+        std::variant<bool> activeStatus;
+        bus.call(reply).read(activeStatus);
+        
+        // Return the boolean value from the variant
+        return std::get<bool>(activeStatus);
+    } catch (const sdbusplus::exception::SdBusError& e) {
+        LogMsg(Logger::Error, "Error retrieving VirtualMedia property: ", e.what());
+        return false;
+    }
+}
+static int extractSlotNumber(const std::string& path) {
+    // Find the position of the last underscore
+    size_t underscorePos = path.find_last_of('_');
+    int slotNumber = -1;
+    // Ensure underscore exists in the path
+    if (underscorePos != std::string::npos) {
+        // Extract the slot number after the underscore
+        slotNumber = std::stoi(path.substr(underscorePos + 1));
+        
+        // Normalize the slot number to be either 0 or 1
+        slotNumber = slotNumber % 2;
+    }
+    // Return the slot number
+    return slotNumber;
+}
+
+static bool retryMount(const std::string& localMountPath, unsigned int maxRetries, unsigned int retryDelay) {
+    // Variables to store mount configuration
+    std::string objpath = "/xyz/openbmc_project/VirtualMedia/Legacy/";
+    std::string interface = "xyz.openbmc_project.VirtualMedia.Legacy";
+    std::string slot_name = localMountPath;
+    DbusVariantType unixFd = -1;
+    std::string Local_image_name;
+    int slotNumber = extractSlotNumber(localMountPath);
+    int fd = -1;
+    //To fix the Coverity issue: Negative Array Index Read
+    if(slotNumber < 0){
+        return false ;
+    }
+    if(creds[slotNumber] != NULL)
+    {
+        Local_image_name = "/tmp/" + localMountPath + "/" + creds[slotNumber]->getUrl().substr(creds[slotNumber]->getUrl().find_last_of("/\\") + 1);
+        objpath = objpath + localMountPath;
+
+        for (unsigned int attempt = 1; attempt <= maxRetries; ++attempt)
+        {
+            try {
+                LogMsg(Logger::Info, " Current Retry for ", localMountPath, " ... ", attempt);
+                if (getActiveStatus(objpath)) {
+                    LogMsg(Logger::Info, "Reconnect success for ", localMountPath); // To Make sure path is not accessible before going for the retry.
+                    return false;
+                }
+                
+                // Retry interval 
+		        std::this_thread::sleep_for(std::chrono::seconds(retryDelay));
+
+                // Reinitialize the bus and message for each attempt
+                int ret = -1;
+                auto b = sdbusplus::bus::new_system();
+                auto m = b.new_method_call(
+                    "xyz.openbmc_project.VirtualMedia",
+                    objpath.c_str(), interface.c_str(), "Mount");
+                std::string url = creds[slotNumber]->getUrl();
+                bool rwStatus = creds[slotNumber]->getRwStatus();
+
+                fd = creds[slotNumber]->releaseFd();
+                if (creds[slotNumber]->getUrl().find("nfs://") != 0) {
+                    unixFd = DbusVariantType(
+                        std::in_place_type<sdbusplus::message::unix_fd>, fd);
+                }
+                m.append(url);
+                m.append(rwStatus);
+                m.append(unixFd);
+                
+		        // Make the D-Bus call and read the status
+                auto reply = b.call(m);
+
+                //Check D-Bus status
+                for (unsigned int i = 0; i < 10; ++i) 
+                {
+                    if (getActiveStatus(objpath) || isFileAccessible(Local_image_name)) {
+                        LogMsg(Logger::Info, "Reconnect success for ", localMountPath);
+                        return false;
+                    }
+                    std::this_thread::sleep_for(std::chrono::seconds(1)); // Wait 1 second
+                }
+            }
+            catch (const sdbusplus::exception::SdBusError& e) {
+                LogMsg(Logger::Error, "D-Bus call failed with error: ", e.what());
+            } catch (const std::exception& e) {
+                LogMsg(Logger::Error, "Standard exception: ", e.what());
+            } catch (...) {
+                LogMsg(Logger::Error, "Unknown exception occurred during D-Bus call.");   
+            }
+        }
+    }
+    LogMsg(Logger::Info, "Error: Exhausted all retry attempts and failed to mounting on ", localMountPath);
+    creds[slotNumber] = nullptr;
+    return false;  // Failed to mount after all retries 
+}
+inline void handleUnmountAndRetry(const std::string& path, int slotNumber) 
+{
+    auto bus = sdbusplus::bus::new_system();
+    auto method = bus.new_method_call(
+        "xyz.openbmc_project.VirtualMedia",           // Service name
+        "/xyz/openbmc_project/VirtualMedia",          // Object path
+        "xyz.openbmc_project.VirtualMedia.Reconnect", // Interface
+        "GetAll"                                      // Method name
+    );
+
+    // Synchronously call the D-Bus method
+    auto reply = bus.call(method);
+
+    // Unpack the response directly
+    std::tuple<uint32_t, uint32_t> result;
+    reply.read(result);
+    unsigned int retryCount = std::get<0>(result);
+    unsigned int retryInterval = std::get<1>(result);
+
+    int ret = isSamePath();
+    if(ret == 1){
+        for (int i = 2; i <= 3; ++i) 
+        {   // Loop to unmount Slot_2 and Slot_3 if the path RMedia server is same
+            std::string slot = "Slot_" + std::to_string(i);
+            unMount(slot);
+            sleep(10);
+        }
+
+        for (int i = 2; i <= 3; ++i) 
+        {   // Loop for Rmedia reconnect for Slot_2 and Slot_3
+            std::string slot = "Slot_" + std::to_string(i);
+            if (!retryMount(slot, retryCount, retryInterval)) 
+            {
+                LogMsg(Logger::Debug, "Retry completed for ", path);
+            }
+            retryThreadCreatedMap[slot].store(false);
+        }
+    }
+    else{
+        unMount(path);
+        sleep(5);
+        if (!retryMount(path, retryCount, retryInterval)) 
+        {
+            LogMsg(Logger::Debug, "Retry completed for ", path);
+        }
+        retryThreadCreatedMap[path].store(false);
+    }
+}
+
+inline void mountMonitorThread(std::string path) {
+    int slotNumber = extractSlotNumber(path);
+    std::string mountPath = "/tmp/" + path;
+    
+    while (true) 
+    {
+	    int result = isMountedPathAccessible(mountPath, 5);
+        if(result == 0)
+        {
+            if (!retryThreadCreatedMap[path].load()) {
+
+            // Launch handleUnmountAndRetry in a separate detached thread
+                std::thread retryThread(handleUnmountAndRetry, path, slotNumber);
+                retryThread.detach();  // Detach to allow mountMonitorThread to continue without waiting
+                if(isSamePath() == 1)
+                {
+                    retryThreadCreatedMap["Slot_2"].store(true);
+                    retryThreadCreatedMap["Slot_3"].store(true);
+                }
+                else{
+                    retryThreadCreatedMap[path].store(true);
+                }
+                is_reconnecting.store(true);
+            }
+            break;  // Exit the loop to stop monitoring
+        } 
+
+        if ((result == -1) && (!retryThreadCreatedMap[path].load())) 
+        {
+            if(isSamePath() == 1){ // If both Slots uses same RMedia server then only one monitor thread will be created based on which Slot comes first. 
+            //If that slot redirection is stopped, Need to update SlotNumber and path to the other Slot. So, that it will continue to monitor.
+                if(slotNumber == 0){
+                    path = "Slot_3";
+                    mountPath = "/tmp/Slot_3";
+                    slotNumber = extractSlotNumber(path);
+                }
+                else if(slotNumber == 1){
+                    mountPath = "/tmp/Slot_2";
+                    path = "Slot_2";
+                    slotNumber = extractSlotNumber(path);
+                }
+                if (creds[slotNumber] != nullptr){
+                    creds[slotNumber] = nullptr;
+                }
+                continue;
+            }
+            else{
+                if (creds[slotNumber] != nullptr)
+                {
+                    creds[slotNumber] = nullptr;  
+                }  
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+	}
+}
+
+static void sleep_ms(int milliseconds)
+{
+    struct timespec ts;
+    ts.tv_sec = milliseconds / 1000;
+    ts.tv_nsec = (milliseconds % 1000) * 1000000;
+    nanosleep(&ts, NULL);
+}
+
 struct UsbGadget
 {
   private:
     static bool echoToFile(const fs::path& fname, const std::string& content)
     {
-        std::ofstream fileWriter;
-        fileWriter.exceptions(std::ofstream::failbit | std::ofstream::badbit);
-        fileWriter.open(fname, std::ios::out | std::ios::app);
-        fileWriter << content << std::endl; // Make sure for new line and flush
-        fileWriter.close();
-        LogMsg(Logger::Debug, "echo ", content, " > ", fname);
-        return true;
+        try
+        {
+            std::ofstream fileWriter;
+            fileWriter.exceptions(std::ofstream::failbit |
+                                  std::ofstream::badbit);
+            fileWriter.open(fname, std::ios::out | std::ios::app);
+            fileWriter << content
+                       << std::endl; // Make sure for new line and flush
+            fileWriter.close();
+            LogMsg(Logger::Debug, "echo ", content, " > ", fname);
+            return true;
+        }
+        catch (const std::exception& e)
+        {
+            LogMsg(Logger::Error, "echoToFile failed for ", fname, ": ",
+                   e.what());
+            return false;
+        }
     }
 
     static constexpr const char* getGadgetDirPrefix()
@@ -517,6 +1151,7 @@ struct UsbGadget
         LogMsg(Logger::Info, "[App]: Configure USB Gadget (name=", name,
                ", path=", path, ", State=", static_cast<uint32_t>(change), ")");
         bool success = true;
+        char usbVmediaName[USB_VMEDIA_NAME_SIZE];
         std::error_code ec;
 
         const fs::path gadgetDir = getGadgetDirPrefix() + name;
@@ -526,11 +1161,41 @@ struct UsbGadget
         const fs::path configDir = gadgetDir / "configs/c.1";
         const fs::path massStorageDir = configDir / "mass_storage.usb0";
         const fs::path configStringsDir = configDir / "strings/0x409";
+        std::string usbVirtualHub;
+        if (fs::exists("/sys/bus/platform/devices/12011000.usb-vhub"))
+        {
+            usbVirtualHub = "12011000";  /* AST2700 A0 */
+        }
+        else if (fs::exists("/sys/bus/platform/devices/12060000.usb-vhub"))
+        {
+            usbVirtualHub = "12060000";  /* AST2700 A1 */
+        }
+        else if (fs::exists("/sys/bus/platform/devices/ci_hdrc.0"))
+        {
+            usbVirtualHub = "ci_hdrc";  /* npcm845 */
+        }
+        else
+        {
+            usbVirtualHub = "1e6a0000";  /* AST2600 */
+        }
+
+        /* Parameters for Session management register/unregister */
+
+        uint8_t sessionId;
+        std::string ipAddr;
+        std::string userName;
+        uint8_t sessionType;
+        uint8_t previlage;
+        uint8_t userId;
+        bool status = false;
+        int reason;
+        std::string mountingMethod, mountpath;
 
         if (change == StateChange::inserted)
         {
             try
             {
+                powerSaveMode(POWER_SAVE_MODE_DISABLE);
                 fs::create_directories(gadgetDir);
                 echoToFile(gadgetDir / "idVendor", "0x1d6b");
                 echoToFile(gadgetDir / "idProduct", "0x0104");
@@ -541,35 +1206,279 @@ struct UsbGadget
                 echoToFile(configStringsDir / "configuration", "config 1");
                 fs::create_directories(funcMassStorageDir);
                 fs::create_directories(funcMassStorageDir / "lun.0");
+                /*symlink-check*/
+                if (fs::is_symlink(massStorageDir))
+                {
+                    LogMsg(Logger::Info,
+                           "Removing old symlink: ",massStorageDir.c_str());
+                    fs::remove(massStorageDir);
+                }
                 fs::create_directory_symlink(funcMassStorageDir,
                                              massStorageDir);
                 echoToFile(funcMassStorageDir / "lun.0/removable", "1");
                 echoToFile(funcMassStorageDir / "lun.0/ro", rw ? "0" : "1");
-                echoToFile(funcMassStorageDir / "lun.0/cdrom", "0");
-                echoToFile(funcMassStorageDir / "lun.0/file", path);
-
-                for (const auto& port : fs::directory_iterator(
-                         "/sys/bus/platform/devices/1e6a0000.usb-vhub"))
+                /* Detect image type (CD/HD) */
+                int imgType = detectImageType(path);
+                if (imgType == -1)
                 {
-                    const std::string portId = port.path().filename();
+                    LogMsg(Logger::Error,
+                           "Failed to detect image type for: ", path);
+                }
 
-                    if (portId.find("1e6a0000.usb-vhub:p") != std::string::npos)
+                /* Check if image size is valid */
+                uint64_t imageSize = 0;
+                if (fs::is_block_file(path))
+                {
+                    int fd = open(path.c_str(), O_RDONLY);
+                    if (fd < 0)
                     {
-                        constexpr std::string_view portDelimiter = ":p";
-                        const std::string portNumber = portId.substr(
-                            portId.find(portDelimiter) + portDelimiter.size());
+                        LogMsg(Logger::Error,
+                               "Failed to open device: ", path);
+                        throw std::runtime_error("Failed to open device");
+                    }
+                    if (ioctl(fd, BLKGETSIZE64, &imageSize) < 0)
+                    {
+                        LogMsg(Logger::Error,
+                               "Failed to get image size for: ", path);
+                        close(fd);
+                        throw std::runtime_error("ioctl BLKGETSIZE64 failed");
+                    }
+                    close(fd);
+                }
+                /* Skip the redirection if the image size is less than 600KB */
+                if (imageSize < 600 * 1024)
+                {
+                    LogMsg(Logger::Error,
+                           "Image file size is too small (", imageSize,
+                           " bytes) for: ", path);
+                    return -1;
+                }
 
-                        // GadgetId is port number minus 1
-                        const int gadgetId = std::stoi(portNumber) - 1;
+                echoToFile(funcMassStorageDir / "lun.0/cdrom", (imgType == 1) ? "1" : "0");
+                echoToFile(funcMassStorageDir / "lun.0/file", path);
+                /*usbVmediaName visible in host is posted to inquiry_string*/
+                sprintf(usbVmediaName,"Virtual USB %s",name.c_str());
+                echoToFile(funcMassStorageDir / "lun.0/inquiry_string", usbVmediaName);
 
-                        if (fs::is_directory(port) && !fs::is_symlink(port) &&
-                            !fs::exists(port.path() /
-                                        ("gadget." + std::to_string(gadgetId)) /
-                                        "suspended"))
+                /* Register session to Session Manager Service */
+
+                sessionId = DEFAULT_SID;
+                ipAddr = DEFAULT_IP;
+                userName = DEFAULT_USER;
+                sessionType = VMEDIA;
+                previlage = PRIV_LEVEL_ADMIN;
+                userId = DEFAULT_USER_ID;
+                mountingMethod = mountMethod(name);
+
+                propertyVariant propertyVar;
+                auto bus = sdbusplus::bus::new_system();
+                auto msgReg = bus.new_method_call(
+                    sessMgrService.c_str(), sessMgrObjPath.c_str(),
+                    sessMgrIface.c_str(), "SessionRegister");
+
+                msgReg.append(sessionId, ipAddr, userName, sessionType,
+                              previlage, userId, mountingMethod);
+
+                auto reply = bus.call(msgReg);
+                reply.read(status);
+
+                mountpath = name;
+		        int slotNumber = extractSlotNumber(mountpath);
+                //To fix the Coverity issue: Negative Array Index Read
+                if(slotNumber < 0){
+                    return false ;
+                }
+                if(mountpath == "Slot_2" || mountpath == "Slot_3")
+                {
+                    if(creds[slotNumber] != NULL){
+                        if (creds[slotNumber]->getUrl().find("https://") != 0){ //To create monitor thread for CIFS/NFS
+                            if(( isSamePath() != 1) || is_reconnecting.load()){
+                                is_reconnecting.store(false);
+                                std::thread monitorThread(mountMonitorThread,mountpath);
+                                monitorThread.detach();
+                            }
+                        }
+                    }
+                }
+                if (status)
+                {
+                    /* Get and update the SessionID in activeSessons */
+                    auto msgGet = bus.new_method_call(
+                        sessMgrService.c_str(), sessMgrObjPath.c_str(),
+                        DBUS_PROPERTIES_INTERFACE, "Get");
+
+                    msgGet.append(sessMgrVmediaIface.c_str(),
+                                  "VmediaSessionInfo");
+
+                    auto reply1 = bus.call(msgGet);
+                    reply1.read(propertyVar);
+
+                    if (std::holds_alternative<sessionList>(propertyVar))
+                    {
+                        sessionList& sesList =
+                            std::get<sessionList>(propertyVar);
+
+                        if (!sesList.empty())
                         {
-                            LogMsg(Logger::Debug, "Use port : ", portId);
-                            echoToFile(gadgetDir / "UDC", portId);
-                            return 0;
+                            const auto& latestEntry = sesList.back();
+                            sessionId =
+                                static_cast<uint8_t>(std::get<0>(latestEntry));
+                            activeSessons.insert({name, sessionId});
+                            LogMsg(Logger::Info, "For ", name,
+                                   " assigned SessionID :",
+                                   static_cast<int>(activeSessons[name]));
+                        }
+                    }
+                }
+
+                /* Spawn a child process to monitor eject status from host */
+                if (fork() == 0)
+                {
+                    prctl(PR_SET_PDEATHSIG, SIGHUP);
+                    std::string filePath = funcMassStorageDir / "lun.0/file";
+                    std::string objpath = "/xyz/openbmc_project/";
+                    std::string interface = "xyz.openbmc_project.VirtualMedia.";
+                    int slot = -1;
+
+                    while (fs::exists(gadgetDir))
+                    {
+                        slot = eject_status(filePath);
+                        if (slot != -1)
+                        {
+                            auto bus = sdbusplus::bus::new_system();
+
+                            if ((slot == 0) || (slot == 1))
+                            {
+                                objpath = objpath + "VirtualMedia/Proxy/Slot_" +
+                                          std::to_string(slot);
+                                interface = interface + "Proxy";
+                            }
+                            else
+                            {
+                                objpath = objpath +
+                                          "VirtualMedia/Legacy/Slot_" +
+                                          std::to_string(slot);
+                                interface = interface + "Legacy";
+                            }
+
+                            auto methodCall = bus.new_method_call(
+                                "xyz.openbmc_project.VirtualMedia",
+                                objpath.c_str(), interface.c_str(), "Unmount");
+                            bus.call(methodCall);
+                            exit(0);
+                        }
+                        sleep(1);
+                    }
+                    exit(0);
+                }
+                else
+                {
+                    /*
+                     * Spawn a child process for cache dropping during
+                     * media-redirection.
+                     */
+                    if (fork() == 0)
+                    {
+                        int nbdFd = open(path.c_str(), O_RDWR);
+                        if (nbdFd < 0)
+                        {
+                            LogMsg(Logger::Error, "Failed to open:", path);
+                            exit(0);
+                        }
+                        LogMsg(Logger::Info,
+                               "posix_fadvise cache drop started for: ", path);
+                        while (fs::exists(gadgetDir))
+                        {
+                            /* Sync & Drop any cached data for this device */
+                            if (fsync(nbdFd) != 0)
+                            {
+                                LogMsg(Logger::Error, "fsync failed", path);
+                                continue;
+                            }
+                            if (posix_fadvise(nbdFd, 0, 0,
+                                              POSIX_FADV_DONTNEED) != 0)
+                            {
+                                LogMsg(Logger::Error,
+                                       "posix_fadvise cache drop failed", path);
+                                continue;
+                            }
+                            sleep_ms(100);
+                        }
+                        LogMsg(Logger::Info,
+                               "posix_fadvise cache drop stopped for: ", path);
+                        close(nbdFd);
+                        exit(0);
+                    }
+                    else
+                    {
+                        if (usbVirtualHub == "12011000" || usbVirtualHub == "12060000" || usbVirtualHub == "1e6a0000")
+                        {
+
+                            for (const auto& port : fs::directory_iterator(
+                                    "/sys/bus/platform/devices/" + usbVirtualHub +
+                                    ".usb-vhub"))
+                            {
+                                const std::string portId = port.path().filename();
+
+                                if (portId.find(usbVirtualHub + ".usb-vhub:p") !=
+                                    std::string::npos)
+                                {
+                                    constexpr std::string_view portDelimiter = ":p";
+                                    const std::string portNumber =
+                                        portId.substr(portId.find(portDelimiter) +
+                                                    portDelimiter.size());
+
+                                    // GadgetId is port number minus 1
+                                    const int gadgetId = std::stoi(portNumber) - 1;
+
+                                    if (fs::is_directory(port) &&
+                                        !fs::is_symlink(port) &&
+                                        !fs::exists(
+                                            port.path() /
+                                            ("gadget." + std::to_string(gadgetId)) /
+                                            "suspended"))
+                                    {
+                                        LogMsg(Logger::Debug,
+                                            "Use port : ", portId);
+                                        echoToFile(gadgetDir / "UDC", portId);
+                                        return 0;
+                                    }
+                                }
+                            }
+                        }
+                        else
+                        {
+                            for (const auto& port : fs::directory_iterator(
+                                    "/sys/bus/platform/devices/"
+                                    ))
+                            {
+                                const std::string portId = port.path().filename();
+
+                                if (portId.find(usbVirtualHub) !=
+                                    std::string::npos)
+                                {
+                                    constexpr std::string_view portDelimiter = ".";
+                                    const std::string portNumber =
+                                        portId.substr(portId.find(portDelimiter) +
+                                                    portDelimiter.size());
+
+                                    // For npcm845, GadgetId is port number
+                                    const int gadgetId = std::stoi(portNumber);
+
+                                    // For npcm845, the UDC node is always a symlink, so this condition check is unnecessary.
+                                    if (fs::is_directory(port) &&
+                                        !fs::exists(
+                                            port.path() /
+                                            ("gadget." + std::to_string(gadgetId)) /
+                                            "suspended"))
+                                    {
+                                        LogMsg(Logger::Debug,
+                                            "Use port : ", portId);
+                                        echoToFile(gadgetDir / "UDC", portId);
+                                        return 0;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -592,11 +1501,46 @@ struct UsbGadget
                 LogMsg(Logger::Error, "[App]: UsbGadget: ", e.what());
                 success = false;
             }
+            catch (const sdbusplus::exception::SdBusError& e)
+            {
+                LogMsg(Logger::Error, "[App]: UsbGadget: D-Bus call Failed ",
+                       e.what());
+                success = false;
+            }
         }
         // StateChange: notMonitored, inserted were handler
         // earlier. We'll get here only for removed, or cleanup
 
         echoToFile(gadgetDir / "UDC", "");
+
+        /*Unregister session from Session Manager Service */
+        if (activeSessons.count(name) > 0)
+        {
+            /*retrive the stored sessionID from activeSessons */
+            sessionId = activeSessons[name];
+            sessionType = VMEDIA;
+            reason = LOGOUT;
+
+            LogMsg(Logger::Info,
+                   "Unregistering SessionID: ", static_cast<int>(sessionId),
+                   " Slot: ", name);
+
+            auto busUnreg = sdbusplus::bus::new_system();
+            auto msgUnreg = busUnreg.new_method_call(
+                sessMgrService.c_str(), sessMgrObjPath.c_str(),
+                sessMgrIface.c_str(), "SessionUnregister");
+
+            msgUnreg.append(sessionId, sessionType, reason);
+            auto reply = busUnreg.call(msgUnreg);
+            reply.read(status);
+            if (!status)
+            {
+                LogMsg(Logger::Error, "failed to Unregister Session");
+            }
+            activeSessons.erase(name);
+            powerSaveMode(POWER_SAVE_MODE_ENABLE);
+        }
+
         const std::array<const char*, 6> dirs = {
             massStorageDir.c_str(),   funcMassStorageDir.c_str(),
             configStringsDir.c_str(), configDir.c_str(),

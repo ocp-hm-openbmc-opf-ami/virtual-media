@@ -26,6 +26,8 @@ struct ActivatingState : public BasicStateT<ActivatingState>
     std::unique_ptr<BasicState> activateLegacyMode();
     std::unique_ptr<BasicState> mountSmbShare();
     std::unique_ptr<BasicState> mountHttpsShare();
+    std::unique_ptr<BasicState> mountNfsShare();
+
 
     static std::unique_ptr<resource::Process>
         spawnNbdKit(interfaces::MountPointStateMachine& machine,
@@ -51,6 +53,10 @@ struct ActivatingState : public BasicStateT<ActivatingState>
     static bool getImagePathFromCifsUrl(const std::string& imageUrl,
                                         std::string* imagePath);
     static fs::path getImagePath(const std::string& imageUrl);
+
+    static bool isNfsUrl(const std::string& imageUrl);
+    static bool getImagePathFromNfsUrl(const std::string& imageUrl,
+                                        std::string* imagePath);
 
     std::unique_ptr<resource::Process> process;
     std::unique_ptr<resource::Gadget> gadget;

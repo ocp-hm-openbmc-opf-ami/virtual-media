@@ -2,6 +2,7 @@
 
 #include "logger.hpp"
 
+#include <sys/mount.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -154,8 +155,7 @@ class NamedPipe
 
     NamedPipe(boost::asio::io_context& io, const std::string name,
               Buffer&& buffer) :
-        name(name),
-        impl(io, name), buffer{std::move(buffer)}
+        name(name), impl(io, name), buffer{std::move(buffer)}
     {
     }
 
@@ -294,8 +294,7 @@ class SignalSender
     SignalSender(std::shared_ptr<sdbusplus::asio::connection> con,
                  const std::string& obj, const std::string& iface,
                  const std::string& name) :
-        con(con),
-        interface(iface), object(obj), name(name){};
+        con(con), interface(iface), object(obj), name(name){};
 
     SignalSender() = delete;
     SignalSender(const SignalSender&) = delete;
@@ -324,8 +323,7 @@ class NotificationWrapper
   public:
     NotificationWrapper(std::unique_ptr<SignalSender> signal,
                         std::unique_ptr<boost::asio::steady_timer> timer) :
-        signal(std::move(signal)),
-        timer(std::move(timer))
+        signal(std::move(signal)), timer(std::move(timer))
     {
     }
 
@@ -362,5 +360,31 @@ class NotificationWrapper
     std::unique_ptr<boost::asio::steady_timer> timer;
     bool started{false};
 };
+
+/// @brief Performs mount operation with safety parameters
+/// @param remotePath Remote file system path
+/// @param localPath Local file system path
+/// @param fs Mount file system type
+/// @param flags Mount flags
+/// @param options Mount options
+/// @return 0 on Success, errorcode on failure
+static int safeMount(const std::string remotePath, const std::string localPath,
+                     const std::string fs, unsigned long flags,
+                     const std::string options)
+{
+    flags += (MS_NODEV | MS_NOEXEC | MS_NOSUID);
+
+    // LogMsg(Logger::info, "Trying to mount ", remotePath, " to ", localPath,
+    //        " on ", fs, " with flags ", flags, " ,options ", options);
+
+    auto ec = ::mount(remotePath.c_str(), localPath.c_str(), fs.c_str(), flags,
+                      options.c_str());
+    if (ec)
+    {
+        LogMsg(Logger::Info, "Mount failed for ", fs, " with ec = ", ec,
+               " errno = ", errno);
+    }
+    return ec;
+}
 
 } // namespace utils

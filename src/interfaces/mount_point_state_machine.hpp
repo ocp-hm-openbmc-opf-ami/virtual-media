@@ -18,6 +18,8 @@ struct MountPointStateMachine
         bool rw;
         std::unique_ptr<resource::Mount> mountPoint;
         std::unique_ptr<utils::CredentialsProvider> credentials;
+       std::unique_ptr<resource::NfsMount> mountPointNfs;
+
     };
 
     virtual ~MountPointStateMachine() = default;

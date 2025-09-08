@@ -13,11 +13,13 @@
 #include <boost/process.hpp>
 #include <boost/system/detail/error_code.hpp>
 #include <filesystem>
-#include <format>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <sdbusplus/asio/connection.hpp>
 #include <sdbusplus/asio/object_server.hpp>
+#include "credentials.hpp"
+boost::asio::io_context ioContext[2];
+std::shared_ptr<Credentials> creds[2];
 
 ActivatingState::ActivatingState(interfaces::MountPointStateMachine& machine) :
     BasicStateT(machine)
@@ -42,8 +44,11 @@ std::unique_ptr<BasicState>
     if (event.devState == StateChange::inserted)
     {
         gadget = std::make_unique<resource::Gadget>(machine, event.devState);
-        return std::make_unique<ActiveState>(machine, std::move(process),
-                                             std::move(gadget));
+        if (gadget->getStatus() == -1) {
+            LogMsg(Logger::Error, "Skipping redirection: image size too small for ", machine.getName());
+            return std::make_unique<ReadyState>(machine, std::errc::invalid_argument, "Image size too small, skipping redirection");
+        }
+        return std::make_unique<ActiveState>(machine, std::move(process), std::move(gadget));
     }
 
     return std::make_unique<DeactivatingState>(machine, std::move(process),
@@ -115,16 +120,40 @@ std::unique_ptr<BasicState> ActivatingState::activateLegacyMode()
                 "Failed to set parent permissions directory for socket");
         }
     }
-
+    
+    int slotNumber = extractSlotNumber(std::string(machine.getName()));
+    //To fix the Coverity issue: Negative Array Index Read
+       if (slotNumber < 0) {
+      LogMsg(Logger::Error, "Unable to process further because slotNumber is Inavlid");
+       return std::make_unique<ReadyState>(machine, std::errc::connection_refused,
+                                        "Unable to process further because slotNumber is Inavlid");
+    }
     if (isCifsUrl(machine.getTarget()->imgUrl))
     {
+        std::string user = machine.getTarget()->credentials->user();
+        std::string pass = machine.getTarget()->credentials->password();
+            creds[slotNumber] = std::make_shared<Credentials>(ioContext[slotNumber],machine.getTarget()->imgUrl, machine.getTarget()->rw);
+            creds[slotNumber]->asyncWrite(
+            std::move(user), std::move(pass),
+            [](const boost::system::error_code& ec,
+                                    std::size_t) {
+            if (ec)
+            {
+                LogMsg(Logger::Error, 
+                   " Unable to write the credentials");
+            }
+        }); 
         return mountSmbShare();
     }
-    if (isHttpsUrl(machine.getTarget()->imgUrl))
+    else if (isHttpsUrl(machine.getTarget()->imgUrl))
     {
         return mountHttpsShare();
     }
-
+    else if (isNfsUrl(machine.getTarget()->imgUrl))
+    {
+        creds[slotNumber] = std::make_shared<Credentials>(ioContext[slotNumber], machine.getTarget()->imgUrl, machine.getTarget()->rw);
+        return mountNfsShare();
+    }
     return std::make_unique<ReadyState>(machine, std::errc::invalid_argument,
                                         "URL not recognized");
 }
@@ -138,7 +167,7 @@ std::unique_ptr<BasicState> ActivatingState::mountSmbShare()
 
         SmbShare smb(mountDir->getPath());
         fs::path remote = getImagePath(machine.getTarget()->imgUrl);
-        auto remoteParent = "/" + remote.parent_path().string();
+        auto remoteParent = "//" + remote.parent_path().string();
         auto localFile = mountDir->getPath() / remote.filename();
 
         LogMsg(Logger::Info, machine.getName(), " Remote name: ", remote,
@@ -177,6 +206,41 @@ std::unique_ptr<BasicState> ActivatingState::mountHttpsShare()
 
     return nullptr;
 }
+std::unique_ptr<BasicState> ActivatingState::mountNfsShare()
+{
+    try
+    {
+        auto mountDir =
+            std::make_unique<resource::Directory>(machine.getName());
+
+        NfsShare nfs(mountDir->getPath());
+        fs::path remote = getImagePath(machine.getTarget()->imgUrl);
+        auto remoteParent = remote.parent_path().string();
+        auto localFile = mountDir->getPath() / remote.filename();
+
+        LogMsg(Logger::Debug, machine.getName(), " Remote name: ", remote,
+               "\n Remote parent: ", remoteParent,
+               "\n Local file: ", localFile);
+
+        machine.getTarget()->mountPointNfs = std::make_unique<resource::NfsMount>(
+            std::move(mountDir), nfs, remoteParent, machine.getTarget()->rw);
+
+        process = spawnNbdKit(machine, localFile);
+        if (!process)
+        {
+            return std::make_unique<ReadyState>(machine,
+                                                std::errc::operation_canceled,
+                                                "Unable to setup NbdKit");
+        }
+
+        return nullptr;
+    }
+    catch (const resource::Error& e)
+    {
+        return std::make_unique<ReadyState>(machine, e.errorCode, e.what());
+    }
+}
+
 
 std::unique_ptr<resource::Process>
     ActivatingState::spawnNbdKit(interfaces::MountPointStateMachine& machine,
@@ -266,8 +330,8 @@ std::unique_ptr<resource::Process>
         // Use curl plugin ...
         "curl",
         // ... to mount http resource at url
+       "sslverify=false",
         "url=" + url,
-        std::format("sslverify={:s}", machine.getConfig().verifyCertificate),
         // custom OpenBMC path for CA
         "cainfo=", "capath=/etc/ssl/certs/authority", "ssl-version=tlsv1.2",
         "followlocation=false",
@@ -313,7 +377,7 @@ bool ActivatingState::getImagePathFromUrl(const std::string& urlScheme,
     {
         if (imagePath != nullptr)
         {
-            *imagePath = imageUrl.substr(urlScheme.size() - 1);
+            *imagePath = imageUrl.substr(urlScheme.size());
             return true;
         }
 
@@ -323,6 +387,17 @@ bool ActivatingState::getImagePathFromUrl(const std::string& urlScheme,
 
     LogMsg(Logger::Error, "Provided url does not match scheme");
     return false;
+}
+
+bool ActivatingState::isNfsUrl(const std::string& imageUrl)
+{
+    return checkUrl("nfs://", imageUrl);
+}
+
+bool ActivatingState::getImagePathFromNfsUrl(const std::string& imageUrl,
+                                              std::string* imagePath)
+{
+    return getImagePathFromUrl("nfs://", imageUrl, imagePath);
 }
 
 bool ActivatingState::isHttpsUrl(const std::string& imageUrl)
@@ -356,6 +431,10 @@ fs::path ActivatingState::getImagePath(const std::string& imageUrl)
         return {imagePath};
     }
     if (isCifsUrl(imageUrl) && getImagePathFromCifsUrl(imageUrl, &imagePath))
+    {
+        return {imagePath};
+    }
+    if (isNfsUrl(imageUrl) && getImagePathFromNfsUrl(imageUrl, &imagePath))
     {
         return {imagePath};
     }
