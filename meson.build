@@ -206,6 +206,7 @@ configure_file(input : 'virtual-media.json',
 srcfiles_app = [ 'src/main.cpp',
                  'src/resources.cpp',
                  'src/state/activating_state.cpp',
+                 'src/vm_interface.cpp',
                ]
 
 bindir = get_option('prefix') + '/' +get_option('libexecdir')

@@ -244,7 +244,7 @@ struct InitialState : public BasicStateT<InitialState>
                            getObjectPath(machine), machine.getName());
 
                     interfaces::MountPointStateMachine::Target target = {
-                        std::move(imgUrl), rw, nullptr, nullptr};
+                        imgUrl, rw, nullptr, nullptr,nullptr};
 
                     LogMsg(Logger::Debug, "[App] Extra data available");
 

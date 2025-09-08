@@ -2,7 +2,7 @@
 
 #include "smb.hpp"
 #include "system.hpp"
-
+#include "nfs.hpp"
 namespace interfaces
 {
 struct MountPointStateMachine;
@@ -88,7 +88,47 @@ class Mount
 
     ~Mount()
     {
-        if (int result = ::umount(directory->getPath().string().c_str()))
+        if (int result = ::umount2(directory->getPath().string().c_str(), MNT_DETACH | MNT_FORCE ))
+        {
+            LogMsg(Logger::Error, result, " : Unable to unmout directory ",
+                   directory->getPath());
+        }
+    }
+
+    std::filesystem::path getPath() const
+    {
+        return directory->getPath();
+    }
+
+  private:
+    std::unique_ptr<Directory> directory;
+};
+
+
+class NfsMount
+{
+  public:
+    NfsMount() = delete;
+    NfsMount(const Mount&) = delete;
+    NfsMount(Mount&& other) = delete;
+    NfsMount& operator=(const Mount&) = delete;
+    NfsMount& operator=(Mount&& other) = delete;
+
+    explicit NfsMount(
+        std::unique_ptr<Directory> directory, NfsShare& nfs,
+        const std::filesystem::path& remote, bool rw) :
+        directory(std::move(directory))
+    {
+        if (!nfs.mount(remote, rw))
+        {
+            throw Error(std::errc::invalid_argument,
+                        "Failed to mount NFS share");
+        }
+    }
+
+    ~NfsMount()
+    {
+        if (int result = ::umount2(directory->getPath().string().c_str(), MNT_DETACH | MNT_FORCE ))
         {
             LogMsg(Logger::Error, result, " : Unable to unmout directory ",
                    directory->getPath());
@@ -153,6 +193,10 @@ class Gadget
 
     Gadget(interfaces::MountPointStateMachine& machine, StateChange devState);
     ~Gadget();
+    int32_t getStatus() const
+    {
+        return status;
+    }
 
   private:
     interfaces::MountPointStateMachine* machine;
