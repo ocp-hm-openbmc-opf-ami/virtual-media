@@ -13,9 +13,9 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
 {
     MountPointStateMachine(boost::asio::io_context& ioc,
                            DeviceMonitor& devMonitor, const std::string& name,
-                           const Configuration::MountPoint& config) :
-        ioc{ioc},
-        name{name}, config{config}
+                           const Configuration::MountPoint& config,
+                           const std::string& additionalInfo) :
+        ioc{ioc}, name{name}, config{config}, additionalInfo{additionalInfo}
     {
         devMonitor.addDevice(config.nbdDevice);
     }
@@ -25,6 +25,10 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
     std::string_view getName() const override
     {
         return name;
+    }
+    std::string_view getAdditionalInfo() const override
+    {
+        return additionalInfo;
     }
 
     Configuration::MountPoint& getConfig() override
@@ -60,6 +64,14 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
         {
             changeState(std::move(newState));
         }
+    }
+
+    void setAdditionalInfo(const std::string& info)
+    {
+
+        additionalInfo = std::move(info);
+        LogMsg(Logger::Debug, name,
+               " Updated additionalInfo : ", additionalInfo);
     }
 
     template <class EventT>
@@ -109,7 +121,7 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
         }
     }
 
-    void
+    virtual void
         notificationInitialize(std::shared_ptr<sdbusplus::asio::connection> con,
                                const std::string& svc, const std::string& iface,
                                const std::string& name) override
@@ -122,7 +134,7 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
         completionNotification = std::make_unique<utils::NotificationWrapper>(
             std::move(signal), std::move(timer));
     }
-    void notificationStart() override
+    void notificationStart()
     {
         auto notificationHandler = [this](const boost::system::error_code& ec) {
             if (ec == boost::system::errc::operation_canceled)
@@ -146,7 +158,7 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
                 5));
     }
 
-    void notify(const std::error_code& ec = {}) override
+    virtual void notify(const std::error_code& ec = {}) override
     {
         completionNotification->notify(ec);
     }
@@ -154,10 +166,10 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
     boost::asio::io_context& ioc;
     std::string name;
     Configuration::MountPoint config;
+    std::string additionalInfo;
     std::unique_ptr<utils::NotificationWrapper> completionNotification;
 
     std::optional<Target> target;
-    bool certificateVerification{true};
     std::unique_ptr<BasicState> state = std::make_unique<InitialState>(*this);
     int exitCode = -1;
 };

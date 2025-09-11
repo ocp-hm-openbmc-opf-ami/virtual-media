@@ -16,7 +16,10 @@
 class Credentials
 {
   public:
-    explicit Credentials(boost::asio::io_context& io, std::string url = "", bool rw_status = false) : impl(io), read(io), url(std::move(url)), rw_status(rw_status)
+    explicit Credentials(boost::asio::io_context& io, std::string url = "",
+                         bool rw_status = false, std::string additionalInfo = "") :
+        impl(io), read(io), url(std::move(url)), rw_status(rw_status),
+        additionalInfo(std::move(additionalInfo))
     {
         boost::system::error_code ec;
         boost::asio::connect_pipe(read, impl, ec);
@@ -58,6 +61,7 @@ class Credentials
 
     std::string getUrl() const { return url; }
     bool getRwStatus() const { return rw_status; }
+    std::string getAdditionalInfo() const { return additionalInfo; }
 
     boost::asio::writable_pipe impl;
     boost::asio::readable_pipe read;
@@ -67,4 +71,5 @@ class Credentials
     bool rw_status;
     std::string user;
     std::string pass;
+    std::string additionalInfo;
 };

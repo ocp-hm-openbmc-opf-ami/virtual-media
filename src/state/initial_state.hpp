@@ -9,7 +9,6 @@
 #include <sdbusplus/asio/connection.hpp>
 #include <string>
 #include <system_error>
-#include <variant>
 
 struct InitialState : public BasicStateT<InitialState>
 {
@@ -190,20 +189,6 @@ struct InitialState : public BasicStateT<InitialState>
                 return static_cast<int>(
                     config.remainingInactivityTimeout.count());
             });
-
-        iface->register_property<bool>(
-            "VerifyCertificate", bool(true),
-            [&config =
-                 machine.getConfig()]([[maybe_unused]] const bool& req,
-                                      [[maybe_unused]] bool& property) -> int {
-                config.verifyCertificate = req;
-                return 1;
-            },
-            [&config =
-                 machine.getConfig()]([[maybe_unused]] const bool& property) {
-                return config.verifyCertificate;
-            });
-
         iface->initialize();
     }
 
@@ -235,45 +220,60 @@ struct InitialState : public BasicStateT<InitialState>
         if (isLegacy)
         {
             using sdbusplus::message::unix_fd;
+            using optional_fd = std::variant<int, unix_fd>;
 
             iface->register_method(
-                "Mount",
-                [&machine = machine](boost::asio::yield_context yield,
-                                     std::string imgUrl, bool rw, unix_fd fd) {
-                    LogMsg(Logger::Info, "[App]: Mount called on ",
-                           getObjectPath(machine), machine.getName());
+                "Mount", [&machine = machine](boost::asio::yield_context yield,
+                                              std::string imgUrl, bool rw,
+                                              optional_fd fd,
+                                              std::string additionalInfo) {
+                    if (machine.getState().get_if<ReadyState>())
+                    {
+                        machine.setAdditionalInfo(additionalInfo);
+                        LogMsg(Logger::Debug,
+                               "[Mount] : Additional info [from Client] : ",
+                               machine.getAdditionalInfo());
+                    }
+                    else
+                    {
+                        LogMsg(Logger::Info,
+                               "[Mount] : Redirection already in progress...");
+                        LogMsg(Logger::Debug,
+                               "[Mount] : Additional info [from Client] : ",
+                               machine.getAdditionalInfo());
+                    }
 
                     interfaces::MountPointStateMachine::Target target = {
                         imgUrl, rw, nullptr, nullptr,nullptr};
 
-                    LogMsg(Logger::Debug, "[App] Extra data available");
-
-                    // Open pipe and prepare output buffer
-                    boost::asio::posix::stream_descriptor secretPipe(
-                        machine.getIoc(), dup(fd.fd));
-                    std::array<char, utils::secretLimit> buf;
-
-                    // Read data
-                    auto size = secretPipe.async_read_some(
-                        boost::asio::buffer(buf), yield);
-
-                    // Validate number of NULL delimiters, ensures
-                    // further operations are safe
-                    auto nullCount =
-                        std::count(buf.begin(), buf.begin() + size, '\0');
-                    if (nullCount != 2)
+                    if (std::holds_alternative<unix_fd>(fd))
                     {
-                        throw sdbusplus::exception::SdBusError(
-                            EINVAL, "Malformed extra data");
-                    }
+                        LogMsg(Logger::Debug, "[App] Extra data available");
 
-                    // First 'part' of payload
-                    std::string user(buf.begin());
-                    // Second 'part', after NULL delimiter
-                    std::string pass(buf.begin() + user.length() + 1);
+                        // Open pipe and prepare output buffer
+                        boost::asio::posix::stream_descriptor secretPipe(
+                            machine.getIoc(), dup(std::get<unix_fd>(fd).fd));
+                        std::array<char, utils::secretLimit> buf;
 
-                    if (!user.empty() || !pass.empty())
-                    {
+                        // Read data
+                        auto size = secretPipe.async_read_some(
+                            boost::asio::buffer(buf), yield);
+
+                        // Validate number of NULL delimiters, ensures
+                        // further operations are safe
+                        auto nullCount =
+                            std::count(buf.begin(), buf.begin() + size, '\0');
+                        if (nullCount != 2)
+                        {
+                            throw sdbusplus::exception::SdBusError(
+                                EINVAL, "Malformed extra data");
+                        }
+
+                        // First 'part' of payload
+                        std::string user(buf.begin());
+                        // Second 'part', after NULL delimiter
+                        std::string pass(buf.begin() + user.length() + 1);
+
                         // Encapsulate credentials into safe buffer
                         target.credentials =
                             std::make_unique<utils::CredentialsProvider>(
@@ -290,14 +290,28 @@ struct InitialState : public BasicStateT<InitialState>
         }
         else // proxy
         {
-            iface->register_method("Mount", [&machine = machine]() mutable {
-                LogMsg(Logger::Info, "[App]: Mount called on ",
-                       getObjectPath(machine), machine.getName());
+            iface->register_method(
+                "Mount",
+                [&machine = machine](std::string additionalInfo) mutable {
+                    if (machine.getState().get_if<ReadyState>())
+                    {
+                        machine.setAdditionalInfo(additionalInfo);
+                        LogMsg(Logger::Debug,
+                               "[Mount] : Additional info [from Client] : ",
+                               machine.getAdditionalInfo());
+                    }
+                    else
+                    {
+                        LogMsg(Logger::Info,
+                               "[Mount] : Redirection already in progress...");
+                        LogMsg(Logger::Debug,
+                               "[Mount] : Additional info [from Client] : ",
+                               machine.getAdditionalInfo());
+                    }
+                    machine.emitMountEvent(std::nullopt);
 
-                machine.emitMountEvent(std::nullopt);
-
-                return true;
-            });
+                    return true;
+                });
         }
 
         iface->initialize();

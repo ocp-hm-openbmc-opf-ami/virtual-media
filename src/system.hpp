@@ -24,7 +24,8 @@
 #include <cstdlib>
 #include <sdbusplus/bus.hpp>
 #include <sdbusplus/exception.hpp>
-#include <variant>
+#include <regex>
+#include <stdexcept>
 #include <linux/fs.h>
 #define USB_VMEDIA_NAME_SIZE 29
 static std::map<std::string, std::atomic<bool>> retryThreadCreatedMap;
@@ -559,6 +560,14 @@ const std::string sessMgrObjPath = "/xyz/openbmc_project/SessionManager";
 const std::string sessMgrIface = "xyz.openbmc_project.SessionManager";
 const std::string sessMgrVmediaIface =
     "xyz.openbmc_project.SessionManager.Vmedia";
+const std::string sessMgrWebIface = "xyz.openbmc_project.SessionManager.Web";
+
+/* Event Logging */
+const std::string eventLogService = "xyz.openbmc_project.Logging";
+const std::string eventLogObjPath = "/xyz/openbmc_project/logging";
+const std::string eventLogIface = "xyz.openbmc_project.Logging.Create";
+const std::string eventlogServerity =
+    "xyz.openbmc_project.Logging.Entry.Level.Informational";
 
 using sessionInfo = std::tuple<uint8_t, std::string, std::string, uint8_t,
                                uint8_t, uint8_t, std::string>;
@@ -609,6 +618,29 @@ static void unMount(std::string Slot)
     }
 
     LogMsg(Logger::Info, " Unmount call on ", Slot, " Successful.");
+}
+
+/* @brief Method to log events to the D-Bus */
+static void eventLogSupport(const std::string& msg)
+{
+    try
+    {
+        auto bus = sdbusplus::bus::new_default_system();
+        sdbusplus::message::message m = bus.new_method_call(
+            eventLogService.c_str(), eventLogObjPath.c_str(),
+            eventLogIface.c_str(), "Create");
+        m.append(msg, eventlogServerity.c_str(),
+                 std::map<std::string, std::string>());
+        bus.call(m);
+    }
+    catch (const sdbusplus::exception::SdBusError& e)
+    {
+        LogMsg(Logger::Error, "Event log D-Bus call Failed ERROR=%s", e.what());
+    }
+    catch (const std::exception& e)
+    {
+        LogMsg(Logger::Error, "Error in Event Log ERROR=%s", e.what());
+    }
 }
 /*
  * @brief Class to monitor Dbus
@@ -919,6 +951,33 @@ static int extractSlotNumber(const std::string& path) {
     return slotNumber;
 }
 
+static uint8_t extractSessionId(const std::string& infoStr)
+{
+    // the regular expression for session validation
+    std::regex sessionPattern("session_(\\d+)");
+    std::smatch match;
+
+    // Searching and Validating session_N from additionalInfo
+    if (std::regex_search(infoStr, match, sessionPattern))
+    {
+        // Extract the numerical value
+        int sessionId = std::stoi(match[1].str());
+        if (sessionId >= 0 && sessionId <= 255)
+        {
+            return static_cast<uint8_t>(sessionId);
+        }
+        else
+        {
+            throw std::out_of_range("Session ID out of uint8_t range (0-255).");
+        }
+    }
+    else
+    {
+        throw std::invalid_argument(
+            "Not found or invalid format: 'session_N' expected.");
+    }
+}
+
 static bool retryMount(const std::string& localMountPath, unsigned int maxRetries, unsigned int retryDelay) {
     // Variables to store mount configuration
     std::string objpath = "/xyz/openbmc_project/VirtualMedia/Legacy/";
@@ -1140,13 +1199,15 @@ struct UsbGadget
 
   public:
     static int32_t configure(const std::string& name, const NBDDevice& nbd,
-                             StateChange change, const bool rw = false)
+                             StateChange change, const bool rw = false,
+                             const std::string& additionalInfo = " ")
     {
-        return configure(name, nbd.to_path(), change, rw);
+        return configure(name, nbd.to_path(), change, rw, additionalInfo);
     }
 
     static int32_t configure(const std::string& name, const fs::path& path,
-                             StateChange change, const bool rw = false)
+                             StateChange change, const bool rw = false,
+                             const std::string& additionalInfo = " ")
     {
         LogMsg(Logger::Info, "[App]: Configure USB Gadget (name=", name,
                ", path=", path, ", State=", static_cast<uint32_t>(change), ")");
@@ -1190,6 +1251,7 @@ struct UsbGadget
         bool status = false;
         int reason;
         std::string mountingMethod, mountpath;
+        uint8_t webSessionId;
 
         if (change == StateChange::inserted)
         {
@@ -1253,7 +1315,6 @@ struct UsbGadget
                            " bytes) for: ", path);
                     return -1;
                 }
-
                 echoToFile(funcMassStorageDir / "lun.0/cdrom", (imgType == 1) ? "1" : "0");
                 echoToFile(funcMassStorageDir / "lun.0/file", path);
                 /*usbVmediaName visible in host is posted to inquiry_string*/
@@ -1262,16 +1323,117 @@ struct UsbGadget
 
                 /* Register session to Session Manager Service */
 
-                sessionId = DEFAULT_SID;
-                ipAddr = DEFAULT_IP;
-                userName = DEFAULT_USER;
-                sessionType = VMEDIA;
-                previlage = PRIV_LEVEL_ADMIN;
-                userId = DEFAULT_USER_ID;
-                mountingMethod = mountMethod(name);
+                LogMsg(
+                    Logger::Debug, "[Session]: (", name, ") ",
+                    "Received additional info[From client] :", additionalInfo);
 
                 propertyVariant propertyVar;
                 auto bus = sdbusplus::bus::new_system();
+
+                try
+                {
+                    webSessionId = extractSessionId(additionalInfo);
+                    bool found = false;
+                    LogMsg(Logger::Info, "[Session]: (", name, ") ",
+                           " Extracted web session ID: ",
+                           static_cast<int>(webSessionId));
+                    auto msgFetch = bus.new_method_call(
+                        sessMgrService.c_str(), sessMgrObjPath.c_str(),
+                        DBUS_PROPERTIES_INTERFACE, "Get");
+
+                    msgFetch.append(sessMgrWebIface.c_str(), "WebSessionInfo");
+
+                    auto reply0 = bus.call(msgFetch);
+                    reply0.read(propertyVar);
+
+                    if (std::holds_alternative<sessionList>(propertyVar))
+                    {
+                        sessionList& webSesionList =
+                            std::get<sessionList>(propertyVar);
+
+                        if (!webSesionList.empty())
+                        {
+                            for (const auto& webSession : webSesionList)
+                            {
+                                if (webSessionId ==
+                                    (static_cast<uint8_t>(
+                                        std::get<0>(webSession))))
+                                {
+                                    LogMsg(
+                                        Logger::Debug, "[Session]: (", name,
+                                        ") ",
+                                        "Retrieved Web Session Details : ",
+                                        " web SessionID : ",
+                                        static_cast<int>(
+                                            std::get<0>(webSession)),
+                                        " Client IP : ",
+                                        std::get<1>(webSession),
+                                        " userName: ", std::get<2>(webSession),
+                                        " sessionType : ",
+                                        static_cast<int>(
+                                            std::get<3>(webSession)),
+                                        " previlage: ",
+                                        static_cast<int>(
+                                            std::get<4>(webSession)),
+                                        " userId: ",
+                                        static_cast<int>(
+                                            std::get<5>(webSession)),
+                                        " mountingMethod: ",
+                                        std::get<6>(webSession));
+
+                                    sessionId = DEFAULT_SID;
+                                    ipAddr = std::get<1>(webSession);
+                                    userName = std::get<2>(webSession);
+                                    ;
+                                    sessionType = VMEDIA;
+                                    previlage = static_cast<uint8_t>(
+                                        std::get<4>(webSession));
+                                    userId = static_cast<uint8_t>(
+                                        std::get<5>(webSession));
+                                    mountingMethod = mountMethod(name);
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!found)
+                    {
+                        LogMsg(
+                            Logger::Info, "[Session]: (", name, ") ",
+                            " Web Session ID: ", static_cast<int>(webSessionId),
+                            " not found in active session list");
+                        webSessionId = DEFAULT_SID; // Default value
+                    }
+                }
+                catch (const sdbusplus::exception::SdBusError& e)
+                {
+                    LogMsg(Logger::Error, "[Session]: (", name, ") ",
+                           "Failed in d-bus call: ", e.what());
+                    webSessionId = DEFAULT_SID; // Default value
+                }
+                catch (const std::exception& e)
+                {
+                    LogMsg(Logger::Info, "[Session]: (", name, ") ",
+                           " Failed to retrive info from web session :",
+                           static_cast<int>(webSessionId),
+                           " EXCEPTION : ", e.what());
+                    webSessionId = DEFAULT_SID; // Default value
+                }
+
+                if (webSessionId == DEFAULT_SID)
+                {
+                    LogMsg(Logger::Info, "[Session]: (", name, ") ",
+                           " Registerring With default values.");
+                    sessionId = DEFAULT_SID;
+                    ipAddr = DEFAULT_IP;
+                    userName = DEFAULT_USER;
+                    sessionType = VMEDIA;
+                    previlage = PRIV_LEVEL_ADMIN;
+                    userId = DEFAULT_USER_ID;
+                    mountingMethod = mountMethod(name);
+                }
+
                 auto msgReg = bus.new_method_call(
                     sessMgrService.c_str(), sessMgrObjPath.c_str(),
                     sessMgrIface.c_str(), "SessionRegister");
@@ -1281,25 +1443,6 @@ struct UsbGadget
 
                 auto reply = bus.call(msgReg);
                 reply.read(status);
-
-                mountpath = name;
-		        int slotNumber = extractSlotNumber(mountpath);
-                //To fix the Coverity issue: Negative Array Index Read
-                if(slotNumber < 0){
-                    return false ;
-                }
-                if(mountpath == "Slot_2" || mountpath == "Slot_3")
-                {
-                    if(creds[slotNumber] != NULL){
-                        if (creds[slotNumber]->getUrl().find("https://") != 0){ //To create monitor thread for CIFS/NFS
-                            if(( isSamePath() != 1) || is_reconnecting.load()){
-                                is_reconnecting.store(false);
-                                std::thread monitorThread(mountMonitorThread,mountpath);
-                                monitorThread.detach();
-                            }
-                        }
-                    }
-                }
                 if (status)
                 {
                     /* Get and update the SessionID in activeSessons */
@@ -1324,9 +1467,36 @@ struct UsbGadget
                             sessionId =
                                 static_cast<uint8_t>(std::get<0>(latestEntry));
                             activeSessons.insert({name, sessionId});
-                            LogMsg(Logger::Info, "For ", name,
-                                   " assigned SessionID :",
+                            LogMsg(Logger::Info, "[Session]: (", name, ") ",
+                                   " Assigned SessionID : ",
                                    static_cast<int>(activeSessons[name]));
+                        }
+                    }
+                }
+
+                // Log the media mount event
+                eventLogSupport("OpenBMC.0.1.MediaMount");
+
+                mountpath = name;
+                int slotNumber = extractSlotNumber(mountpath);
+                // To fix the Coverity issue: Negative Array Index Read
+                if (slotNumber < 0)
+                {
+                    return false;
+                }
+                if (mountpath == "Slot_2" || mountpath == "Slot_3")
+                {
+                    if (creds[slotNumber] != NULL)
+                    {
+                        if (creds[slotNumber]->getUrl().find("https://") != 0)
+                        { // To create monitor thread for CIFS/NFS
+                            if ((isSamePath() != 1) || is_reconnecting.load())
+                            {
+                                is_reconnecting.store(false);
+                                std::thread monitorThread(mountMonitorThread,
+                                                          mountpath);
+                                monitorThread.detach();
+                            }
                         }
                     }
                 }
@@ -1521,9 +1691,8 @@ struct UsbGadget
             sessionType = VMEDIA;
             reason = LOGOUT;
 
-            LogMsg(Logger::Info,
-                   "Unregistering SessionID: ", static_cast<int>(sessionId),
-                   " Slot: ", name);
+            LogMsg(Logger::Info, "[Session]: (", name, ") ",
+                   "Unregistering SessionID: ", static_cast<int>(sessionId));
 
             auto busUnreg = sdbusplus::bus::new_system();
             auto msgUnreg = busUnreg.new_method_call(
@@ -1535,9 +1704,12 @@ struct UsbGadget
             reply.read(status);
             if (!status)
             {
-                LogMsg(Logger::Error, "failed to Unregister Session");
+                LogMsg(Logger::Error, "[Session]: (", name, ") ",
+                       "failed to Unregister Session");
             }
             activeSessons.erase(name);
+            // Log the media unmount event
+            eventLogSupport("OpenBMC.0.1.MediaUnmount");
             powerSaveMode(POWER_SAVE_MODE_ENABLE);
         }
 

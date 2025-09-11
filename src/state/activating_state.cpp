@@ -91,6 +91,8 @@ std::unique_ptr<BasicState> ActivatingState::activateLegacyMode()
     LogMsg(Logger::Info, machine.getName(),
            " Mount requested on address: ", machine.getTarget()->imgUrl,
            " ; RW: ", machine.getTarget()->rw);
+    LogMsg(Logger::Debug,
+       "Additional Info [from Client]: ", machine.getAdditionalInfo());
 
     std::filesystem::path socketPath(machine.getConfig().unixSocket);
     if (!std::filesystem::exists(socketPath.parent_path()))
@@ -133,17 +135,17 @@ std::unique_ptr<BasicState> ActivatingState::activateLegacyMode()
     {
         std::string user = machine.getTarget()->credentials->user();
         std::string pass = machine.getTarget()->credentials->password();
-            creds[slotNumber] = std::make_shared<Credentials>(ioContext[slotNumber],machine.getTarget()->imgUrl, machine.getTarget()->rw);
-            creds[slotNumber]->asyncWrite(
+        creds[slotNumber] = std::make_shared<Credentials>(
+            ioContext[slotNumber], machine.getTarget()->imgUrl,
+            machine.getTarget()->rw, std::string(machine.getAdditionalInfo()));
+        creds[slotNumber]->asyncWrite(
             std::move(user), std::move(pass),
-            [](const boost::system::error_code& ec,
-                                    std::size_t) {
-            if (ec)
-            {
-                LogMsg(Logger::Error, 
-                   " Unable to write the credentials");
-            }
-        }); 
+            [](const boost::system::error_code& ec, std::size_t) {
+                if (ec)
+                {
+                    LogMsg(Logger::Error, " Unable to write the credentials");
+                }
+            });
         return mountSmbShare();
     }
     else if (isHttpsUrl(machine.getTarget()->imgUrl))
@@ -152,7 +154,9 @@ std::unique_ptr<BasicState> ActivatingState::activateLegacyMode()
     }
     else if (isNfsUrl(machine.getTarget()->imgUrl))
     {
-        creds[slotNumber] = std::make_shared<Credentials>(ioContext[slotNumber], machine.getTarget()->imgUrl, machine.getTarget()->rw);
+        creds[slotNumber] = std::make_shared<Credentials>(
+            ioContext[slotNumber], machine.getTarget()->imgUrl,
+            machine.getTarget()->rw, std::string(machine.getAdditionalInfo()));
         return mountNfsShare();
     }
     return std::make_unique<ReadyState>(machine, std::errc::invalid_argument,

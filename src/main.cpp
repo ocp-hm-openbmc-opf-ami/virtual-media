@@ -49,7 +49,7 @@ class App
         for (const auto& [name, entry] : config.mountPoints)
         {
             mpsm[name] = std::make_shared<MountPointStateMachine>(
-                ioc, devMonitor, name, entry);
+                ioc, devMonitor, name, entry,std::string());
             mpsm[name]->emitRegisterDBusEvent(bus, objServer);
         }
 
