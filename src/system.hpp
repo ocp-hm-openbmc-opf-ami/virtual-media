@@ -1257,7 +1257,7 @@ struct UsbGadget
                 echoToFile(funcMassStorageDir / "lun.0/cdrom", (imgType == 1) ? "1" : "0");
                 echoToFile(funcMassStorageDir / "lun.0/file", path);
                 /*usbVmediaName visible in host is posted to inquiry_string*/
-                sprintf(usbVmediaName,"Virtual USB %s",name.c_str());
+		snprintf(usbVmediaName, USB_VMEDIA_NAME_SIZE, "Virtual USB %s", name.c_str());
                 echoToFile(funcMassStorageDir / "lun.0/inquiry_string", usbVmediaName);
 
                 /* Register session to Session Manager Service */
