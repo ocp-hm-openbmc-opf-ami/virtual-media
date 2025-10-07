@@ -1465,6 +1465,11 @@ struct UsbGadget
                                     // For npcm845, GadgetId is port number
                                     const int gadgetId = std::stoi(portNumber);
 
+                                    // Skip reserved port number 8 and 9
+                                    if (gadgetId == 8 || gadgetId == 9) {
+                                        continue;
+                                    }
+
                                     // For npcm845, the UDC node is always a symlink, so this condition check is unnecessary.
                                     if (fs::is_directory(port) &&
                                         !fs::exists(
