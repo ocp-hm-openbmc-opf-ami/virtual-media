@@ -555,11 +555,11 @@ class Process : public std::enable_shared_from_this<Process>
 #define DBUS_PROPERTIES_INTERFACE "org.freedesktop.DBus.Properties"
 
 const std::string sessMgrService = "xyz.openbmc_project.SessionManager";
-const std::string sessMgrObjPath = "/xyz/openbmc_project/SessionManager";
-const std::string sessMgrIface = "xyz.openbmc_project.SessionManager";
+const std::string sessMgrVmediaObjPath = "/xyz/openbmc_project/SessionManager/vmedia";
+const std::string sessMgrWEBObjPath = "/xyz/openbmc_project/SessionManager/web";
 const std::string sessMgrVmediaIface =
-    "xyz.openbmc_project.SessionManager.Vmedia";
-const std::string sessMgrWebIface = "xyz.openbmc_project.SessionManager.Web";
+    "xyz.openbmc_project.SessionManager.VmediaSessionInfo";
+const std::string sessMgrWebIface = "xyz.openbmc_project.SessionManager.WebSessionInfo";
 
 /* Event Logging */
 const std::string eventLogService = "xyz.openbmc_project.Logging";
@@ -569,7 +569,7 @@ const std::string eventlogServerity =
     "xyz.openbmc_project.Logging.Entry.Level.Informational";
 
 using sessionInfo = std::tuple<uint8_t, std::string, std::string, uint8_t,
-                               uint8_t, uint8_t, std::string>;
+                               uint8_t, uint8_t, std::string, std::string>;
 using sessionList = std::vector<sessionInfo>;
 using propertyVariant = std::variant<sessionList>;
 
@@ -796,7 +796,7 @@ class DbusMonitor
 
         sdbusplus::bus::match_t sessionMatcher(
             static_cast<sdbusplus::bus::bus&>(*conn),
-            "type='signal',member='PropertiesChanged',path='" + sessMgrObjPath +
+            "type='signal',member='PropertiesChanged',path='" + sessMgrVmediaObjPath +
                 "',arg0namespace='" + sessMgrVmediaIface + "'",
             std::move(sessionCallback));
 
@@ -1368,7 +1368,7 @@ struct UsbGadget
         uint8_t previlage;
         uint8_t userId;
         bool status = false;
-        int reason;
+        uint8_t reason;
         std::string mountingMethod, mountpath;
         uint8_t webSessionId;
 
@@ -1451,11 +1451,29 @@ struct UsbGadget
                 auto bus = sdbusplus::bus::new_system();
                 if (isLmedia)
                 {
+<<<<<<< HEAD
                     webSessionId = DEFAULT_SID;
                 }
                 else
                 {
                     try
+=======
+                    webSessionId = extractSessionId(additionalInfo);
+                    bool found = false;
+                    LogMsg(Logger::Info, "[Session]: (", name, ") ",
+                           " Extracted web session ID: ",
+                           static_cast<int>(webSessionId));
+                    auto msgFetch = bus.new_method_call(
+                        sessMgrService.c_str(), sessMgrWEBObjPath.c_str(),
+                        DBUS_PROPERTIES_INTERFACE, "Get");
+
+                    msgFetch.append(sessMgrWebIface.c_str(), "WebSessionInfo");
+
+                    auto reply0 = bus.call(msgFetch);
+                    reply0.read(propertyVar);
+
+                    if (std::holds_alternative<sessionList>(propertyVar))
+>>>>>>> 3f3a396 (Enhanced VMedia session management)
                     {
                         webSessionId = extractSessionId(additionalInfo);
                         bool found = false;
@@ -1563,11 +1581,11 @@ struct UsbGadget
                 }
 
                 auto msgReg = bus.new_method_call(
-                    sessMgrService.c_str(), sessMgrObjPath.c_str(),
-                    sessMgrIface.c_str(), "SessionRegister");
+                    sessMgrService.c_str(), sessMgrVmediaObjPath.c_str(),
+                    sessMgrVmediaIface.c_str(), "VmediaSessionRegister");
 
                 msgReg.append(sessionId, ipAddr, userName, sessionType,
-                              previlage, userId, mountingMethod);
+                              previlage, userId, mountingMethod, name);
 
                 auto reply = bus.call(msgReg);
                 reply.read(status);
@@ -1575,7 +1593,7 @@ struct UsbGadget
                 {
                     /* Get and update the SessionID in activeSessons */
                     auto msgGet = bus.new_method_call(
-                        sessMgrService.c_str(), sessMgrObjPath.c_str(),
+                        sessMgrService.c_str(), sessMgrVmediaObjPath.c_str(),
                         DBUS_PROPERTIES_INTERFACE, "Get");
 
                     msgGet.append(sessMgrVmediaIface.c_str(),
@@ -1867,8 +1885,8 @@ struct UsbGadget
 
             auto busUnreg = sdbusplus::bus::new_system();
             auto msgUnreg = busUnreg.new_method_call(
-                sessMgrService.c_str(), sessMgrObjPath.c_str(),
-                sessMgrIface.c_str(), "SessionUnregister");
+                sessMgrService.c_str(), sessMgrVmediaObjPath.c_str(),
+                sessMgrVmediaIface.c_str(), "VmediaSessionUnregister");
 
             msgUnreg.append(sessionId, sessionType, reason);
             auto reply = busUnreg.call(msgUnreg);
