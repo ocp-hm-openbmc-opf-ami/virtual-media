@@ -25,6 +25,9 @@ struct InitialState : public BasicStateT<InitialState>
         const bool isLegacy =
             (machine.getConfig().mode == Configuration::Mode::legacy);
 
+        const bool isLocal =
+            (machine.getConfig().mode == Configuration::Mode::local);
+
 #ifndef LEGACY_MODE_ENABLED
         if (isLegacy)
         {
@@ -33,13 +36,15 @@ struct InitialState : public BasicStateT<InitialState>
                                                 "Legacy mode is not supported");
         }
 #endif
-        if (isLegacy)
+        if (isLegacy || isLocal)
         {
             cleanUpMountPoint();
         }
         addMountPointInterface(event);
         addProcessInterface(event);
         addServiceInterface(event, isLegacy);
+
+        addGlobalLocalMountService(event);
 
         return std::make_unique<ReadyState>(machine);
     }
@@ -52,18 +57,29 @@ struct InitialState : public BasicStateT<InitialState>
     }
 
   private:
+
+    inline static std::map<std::string, interfaces::MountPointStateMachine*> allMountPoints;
+    inline static bool globalLocalServiceCreated;
+    inline static std::shared_ptr<sdbusplus::asio::object_server> globalObjServer;
+
     static std::string
         getObjectPath(interfaces::MountPointStateMachine& machine)
     {
         LogMsg(Logger::Debug, "getObjectPath entry()");
         std::string objPath;
-        if (machine.getConfig().mode == Configuration::Mode::proxy)
+
+        switch (machine.getConfig().mode)
         {
-            objPath = "/xyz/openbmc_project/VirtualMedia/Proxy/";
-        }
-        else
-        {
-            objPath = "/xyz/openbmc_project/VirtualMedia/Legacy/";
+            case Configuration::Mode::proxy:
+                objPath = "/xyz/openbmc_project/VirtualMedia/Proxy/";
+                break;
+            case Configuration::Mode::local:
+                objPath = "/xyz/openbmc_project/VirtualMedia/Local/";
+                break;
+            case Configuration::Mode::legacy:
+            default:
+                objPath = "/xyz/openbmc_project/VirtualMedia/Legacy/";
+                break;
         }
         return objPath;
     }
@@ -315,5 +331,225 @@ struct InitialState : public BasicStateT<InitialState>
         }
 
         iface->initialize();
+    }
+
+    void addGlobalLocalMountService(const RegisterDbusEvent& event)
+    {
+        // Store reference to this mount point for global access
+        allMountPoints[std::string(machine.getName())] = &machine;
+        globalObjServer = event.objServer;
+
+        // Create the global service only once (when first mount point
+        // initializes)
+        if (!globalLocalServiceCreated)
+        {
+            createGlobalLocalMountInterface(event);
+            globalLocalServiceCreated = true;
+        }
+    }
+
+    static void createGlobalLocalMountInterface(const RegisterDbusEvent& event)
+    {
+        LogMsg(Logger::Info,
+               "Creating Global Local Service for dynamic allocation");
+
+        auto localIface = event.objServer->add_interface(
+            "/xyz/openbmc_project/VirtualMedia/Local",
+            "xyz.openbmc_project.VirtualMedia.Local");
+
+        // **Dynamic Mount Method - finds first available slot**
+        localIface->register_method(
+            "Mount", [](std::string localPath, bool rw) -> std::string {
+                LogMsg(Logger::Info,
+                       "[Local]: Dynamic mount requested for: ", localPath);
+
+                std::vector<std::string> slotOrder = {"Slot_0", "Slot_1",
+                                                      "Slot_2", "Slot_3"};
+
+                // Check for existing local mounts
+                for (const auto& slotName : slotOrder)
+                {
+                    auto it = allMountPoints.find(slotName);
+                    if (it != allMountPoints.end())
+                    {
+                        auto* machine = it->second;
+
+                        // Check if slot has a local mount active
+                        if (machine->getTarget().has_value())
+                        {
+                            const std::string& mountedPath =
+                                machine->getTarget()->imgUrl;
+
+                            if (mountedPath.starts_with("/tmp/lmedia/") &&
+                                std::filesystem::exists(mountedPath))
+                            {
+                                LogMsg(Logger::Error,
+                                       "Local mount already active on slot: ",
+                                       slotName, " with path: ", mountedPath);
+                                throw sdbusplus::exception::SdBusError(
+                                    EBUSY, ("Only one local media redirection "
+                                            "allowed at a time. "
+                                            "Currently mounted: " +
+                                            mountedPath + " on " + slotName)
+                                               .c_str());
+                            }
+                        }
+                    }
+                }
+                if (!localPath.starts_with("/tmp/lmedia/"))
+                {
+                    LogMsg(Logger::Error,
+                           "Local file must be in /tmp/lmedia directory: ",
+                           localPath);
+                    throw sdbusplus::exception::SdBusError(
+                        EINVAL, "Local media redirection only allowed from "
+                                "/tmp/lmedia directory");
+                }
+                // Validate local file exists
+                if (!std::filesystem::exists(localPath))
+                {
+                    LogMsg(Logger::Error,
+                           "Local file does not exist: ", localPath);
+                    throw sdbusplus::exception::SdBusError(ENOENT,
+                         ("Local file not found: " + localPath).c_str());
+                }
+
+                // Validate it's a regular file
+                if (!std::filesystem::is_regular_file(localPath))
+                {
+                    LogMsg(Logger::Error,
+                           "Path is not a regular file: ", localPath);
+                    throw sdbusplus::exception::SdBusError(
+                        EINVAL,
+                        ("File must be a regular file: " + localPath).c_str());
+                }
+
+                // Find first available slot for mounting
+                for (const auto& slotName : slotOrder)
+                {
+                    auto it = allMountPoints.find(slotName);
+                    if (it != allMountPoints.end())
+                    {
+                        auto* machine = it->second;
+
+                        if (machine->getState().get_if<ReadyState>() &&
+                            !machine->getTarget().has_value())
+                        {
+
+                            LogMsg(Logger::Info,
+                                   "Dynamically assigned slot: ", slotName,
+                                   " for local file: ", localPath);
+
+                            // Create target for local mount
+                            interfaces::MountPointStateMachine::Target target;
+                            target.imgUrl = localPath;
+                            target.rw = rw;
+                            target.mountPoint = nullptr;
+                            target.credentials = nullptr;
+                            target.mountPointNfs = nullptr;
+
+                            machine->emitMountEvent(std::move(target));
+                            return slotName; // Return which slot was used
+                        }
+                    }
+                }
+
+                throw sdbusplus::exception::SdBusError(EBUSY,
+                    "No available slots for local mounting");
+            });
+
+        // **LMEDIA Unmount Method**
+        localIface->register_method("Unmount", []() -> bool {
+            LogMsg(Logger::Info,
+                   "[Local]: Unmount requested ");
+
+            std::vector<std::string> slotOrder = {"Slot_0", "Slot_1", "Slot_2",
+                                                  "Slot_3"};
+            for (const auto& slotName : slotOrder)
+            {
+                auto it = allMountPoints.find(slotName);
+                if (it != allMountPoints.end())
+                {
+                    auto* machine = it->second;
+                    if (machine->getTarget().has_value())
+                    {
+                        const std::string& mountedPath =
+                            machine->getTarget()->imgUrl;
+
+                        if (mountedPath.starts_with("/tmp/lmedia/") &&
+                            std::filesystem::exists(mountedPath))
+                        {
+                            LogMsg(Logger::Info,
+                                   "Unmounting local file: ", mountedPath,
+                                   " from slot: ", slotName);
+                            machine->emitUnmountEvent();
+                            LogMsg(Logger::Info,
+                                   "Successfully unmounted slot: ", slotName);
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            LogMsg(Logger::Warning,
+                   "No local media redirection active to unmount");
+            return false;
+        });
+
+        // **Get Current Local Mount Status**
+        localIface->register_method("GetCurrentMount", []() -> std::string {
+            std::vector<std::string> slotOrder = {"Slot_0", "Slot_1", "Slot_2",
+                                                  "Slot_3"};
+
+            for (const auto& slotName : slotOrder)
+            {
+                auto it = allMountPoints.find(slotName);
+                if (it != allMountPoints.end())
+                {
+                    auto* machine = it->second;
+
+                    if (machine->getTarget().has_value())
+                    {
+                        const std::string& mountedPath =
+                            machine->getTarget()->imgUrl;
+
+                        if (mountedPath.starts_with("/tmp/lmedia/") &&
+                            std::filesystem::exists(mountedPath))
+                        {
+                            return slotName + ":" + mountedPath;
+                        }
+                    }
+                }
+            }
+
+            return ""; // No local mount active
+        });
+
+        // List available slots
+        localIface->register_method(
+            "ListAvailableSlots", []() -> std::vector<std::string> {
+                std::vector<std::string> availableSlots;
+                std::vector<std::string> slotOrder = {"Slot_0", "Slot_1",
+                                                     "Slot_2", "Slot_3"};
+
+                for (const auto& slotName : slotOrder)
+                {
+                    auto it = allMountPoints.find(slotName);
+                    if (it != allMountPoints.end())
+                    {
+                        auto* machine = it->second;
+                        if (machine->getState().get_if<ReadyState>() &&
+                            !machine->getTarget().has_value())
+                        {
+                            availableSlots.push_back(slotName);
+                        }
+                    }
+                }
+
+                return availableSlots;
+            });
+
+        localIface->initialize();
+        LogMsg(Logger::Info, "Global LMedia Interface created successfully");
     }
 };

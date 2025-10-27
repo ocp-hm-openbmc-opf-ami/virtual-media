@@ -66,6 +66,18 @@ std::unique_ptr<BasicState> ActivatingState::handleEvent([
 
 std::unique_ptr<BasicState> ActivatingState::activateProxyMode()
 {
+    if (machine.getTarget().has_value())
+    {
+        LogMsg(Logger::Info, machine.getName(),
+               " [Local] Mount requested on address: ",
+               machine.getTarget()->imgUrl, " ; RW: ", machine.getTarget()->rw);
+
+        if (isLocalFile(machine.getTarget()->imgUrl))
+        {
+            return mountLocalFile();
+        }
+    }
+
     process = std::make_unique<resource::Process>(
         machine, std::make_shared<::Process>(
                      machine.getIoc(), machine.getName(),
@@ -131,6 +143,12 @@ std::unique_ptr<BasicState> ActivatingState::activateLegacyMode()
        return std::make_unique<ReadyState>(machine, std::errc::connection_refused,
                                         "Unable to process further because slotNumber is Inavlid");
     }
+
+    if (isLocalFile(machine.getTarget()->imgUrl))
+    {
+        return mountLocalFile();
+    }
+
     if (isCifsUrl(machine.getTarget()->imgUrl))
     {
         std::string user = machine.getTarget()->credentials->user();
@@ -446,4 +464,69 @@ fs::path ActivatingState::getImagePath(const std::string& imageUrl)
 
     LogMsg(Logger::Error, "Unrecognized url's scheme encountered");
     return {""};
+}
+
+bool ActivatingState::isLocalFile(const std::string& imagePath)
+{
+    return imagePath.starts_with("/tmp/lmedia/");
+}
+
+std::unique_ptr<BasicState> ActivatingState::mountLocalFile()
+{
+    LogMsg(Logger::Info, machine.getName(),
+           " Mounting local file: ", machine.getTarget()->imgUrl);
+
+    // Validate local file exists and is readable
+    std::filesystem::path localFilePath(machine.getTarget()->imgUrl);
+
+    if (!std::filesystem::exists(localFilePath))
+    {
+        LogMsg(Logger::Error,
+               "Local file does not exist: ", machine.getTarget()->imgUrl);
+        return std::make_unique<ReadyState>(
+            machine, std::errc::no_such_file_or_directory,
+            "Local file does not exist");
+    }
+
+    if (!std::filesystem::is_regular_file(localFilePath))
+    {
+        LogMsg(Logger::Error,
+               "Path is not a regular file: ", machine.getTarget()->imgUrl);
+        return std::make_unique<ReadyState>(machine,
+                                            std::errc::invalid_argument,
+                                            "Path must be a regular file");
+    }
+
+    // Check file permissions
+    std::error_code ec;
+    auto perms = std::filesystem::status(localFilePath, ec).permissions();
+    if (ec)
+    {
+        LogMsg(Logger::Error,
+               "Unable to check file permissions: ", ec.message());
+        return std::make_unique<ReadyState>(machine,
+                                            static_cast<std::errc>(ec.value()),
+                                            "Unable to check file permissions");
+    }
+
+    // For read-write mode, ensure file is writable
+    if (machine.getTarget()->rw &&
+        (perms & std::filesystem::perms::owner_write) ==
+            std::filesystem::perms::none)
+    {
+        LogMsg(Logger::Error, "File is not writable but RW mode requested");
+        return std::make_unique<ReadyState>(
+            machine, std::errc::permission_denied, "File is not writable");
+    }
+
+    // Spawn NBD kit with local file
+    process = spawnNbdKit(machine, localFilePath);
+    if (!process)
+    {
+        return std::make_unique<ReadyState>(
+            machine, std::errc::operation_canceled,
+            "Unable to setup NBDKit for local file");
+    }
+
+    return nullptr;
 }

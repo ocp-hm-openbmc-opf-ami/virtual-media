@@ -27,6 +27,12 @@ class Configuration
         // VirtualMedia schemas, then BMC process connects to external
         // CIFS/HTTPS image pointed during initialization.
         legacy = 1,
+
+        // Local mode - is initiated from browser using Redfish defined
+        // VirtualMedia schemas, then BMC process connects to local
+        // image file on the BMC filesystem.
+        local = 2,
+
     };
 
     static constexpr mode_t defaultUmask = 077;

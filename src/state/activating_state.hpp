@@ -27,6 +27,7 @@ struct ActivatingState : public BasicStateT<ActivatingState>
     std::unique_ptr<BasicState> mountSmbShare();
     std::unique_ptr<BasicState> mountHttpsShare();
     std::unique_ptr<BasicState> mountNfsShare();
+    std::unique_ptr<BasicState> mountLocalFile();
 
 
     static std::unique_ptr<resource::Process>
@@ -57,6 +58,8 @@ struct ActivatingState : public BasicStateT<ActivatingState>
     static bool isNfsUrl(const std::string& imageUrl);
     static bool getImagePathFromNfsUrl(const std::string& imageUrl,
                                         std::string* imagePath);
+
+    static bool isLocalFile(const std::string& imagePath);
 
     std::unique_ptr<resource::Process> process;
     std::unique_ptr<resource::Gadget> gadget;
