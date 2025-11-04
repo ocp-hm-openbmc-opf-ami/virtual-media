@@ -1025,6 +1025,8 @@ static bool retryMount(const std::string& localMountPath, unsigned int maxRetrie
                 m.append(url);
                 m.append(rwStatus);
                 m.append(unixFd);
+		// Use stored additionalInfo from credentials
+		m.append(creds[slotNumber]->getAdditionalInfo());
                 
 		        // Make the D-Bus call and read the status
                 auto reply = b.call(m);
