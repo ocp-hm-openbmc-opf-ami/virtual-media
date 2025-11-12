@@ -10,6 +10,7 @@ namespace vm
 {
     const std::string vmObjPath = "/xyz/openbmc_project/VirtualMedia";
     const std::string RmediaInterface = "xyz.openbmc_project.VirtualMedia.Reconnect";
+    const std::string RmediaImageURLInterface = "xyz.openbmc_project.VirtualMedia.BackupImageURL"; // Interface for setting and getting the backup image URL
 
     class Interface
     {
@@ -22,6 +23,10 @@ namespace vm
 
         // Method to add interfaces
         void addInterfaces();
+
+	static void saveImageURLToJson(const std::string& imageURL, const std::string& slotKey);
+        void loadImageURLFromJson();
+	static Interface* instance;
 
     private:
         // Method to add the Virtual Media interface
@@ -36,6 +41,7 @@ namespace vm
         // Member variables
         std::shared_ptr<sdbusplus::asio::object_server> server;
         std::shared_ptr<sdbusplus::asio::dbus_interface> vmediaInterface; // D-Bus interface object
+	std::shared_ptr<sdbusplus::asio::dbus_interface> vmediaImageURLInterface;
 
         unsigned int RetryCount = 0;     // Initial default value for retry count
         unsigned int RetryInterval = 0;  // Initial default value for retry interval

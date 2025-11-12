@@ -19,6 +19,7 @@
 #include <sdbusplus/asio/connection.hpp>
 #include <sdbusplus/asio/object_server.hpp>
 #include "credentials.hpp"
+#include "vm_interface.hpp"
 boost::asio::io_context ioContext[2];
 std::shared_ptr<Credentials> creds[2];
 
@@ -105,6 +106,8 @@ std::unique_ptr<BasicState> ActivatingState::activateLegacyMode()
            " ; RW: ", machine.getTarget()->rw);
     LogMsg(Logger::Debug,
        "Additional Info [from Client]: ", machine.getAdditionalInfo());
+    // Save the image URL to JSON configuration
+    vm::Interface::saveImageURLToJson(machine.getTarget()->imgUrl, std::string(machine.getName()));
 
     std::filesystem::path socketPath(machine.getConfig().unixSocket);
     if (!std::filesystem::exists(socketPath.parent_path()))

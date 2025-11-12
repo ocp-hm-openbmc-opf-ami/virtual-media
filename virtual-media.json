@@ -35,5 +35,13 @@
         }
     },
     "RetryCount": 3,
-    "RetryInterval": 15
+    "RetryInterval": 15,
+    "BackupImageURL": {
+        "Slot_2": {
+            "ImageURL": ""
+        },
+        "Slot_3": {
+            "ImageURL": ""
+        }
+    }
 }
