@@ -3,6 +3,7 @@
 #include "logger.hpp"
 #include "vm_interface.hpp"
 #include <nlohmann/json.hpp>
+#include "system.hpp"
 
 #define MIN_RETRY_COUNT 3
 #define MAX_RETRY_COUNT 6
@@ -40,13 +41,88 @@ namespace vm
 
     // Constructor to initialize the object server and add the interface
     Interface::Interface(std::shared_ptr<sdbusplus::asio::object_server> objServer) : server(objServer)
-    {}
+    {
+	instance = this;	
+    }
+    Interface* Interface::instance = nullptr;
 
     // Method to add interfaces
     void Interface::addInterfaces()
     {
         loadJson();
         addRmediaInterface();
+	loadImageURLFromJson();
+    }
+
+    //save the image URL to JSON configuration
+    void Interface::saveImageURLToJson(const std::string& imageURL, const std::string& slotKey)
+    {
+        if (slotKey != "Slot_2" && slotKey != "Slot_3") {
+	    LogMsg(Logger::Debug," Unsupported slot: ", slotKey.c_str());
+	    return;
+        }
+
+        loadJson();
+        if (jsonData.contains("BackupImageURL") &&
+	    jsonData["BackupImageURL"].contains(slotKey))
+        {
+            jsonData["BackupImageURL"][slotKey]["ImageURL"] = imageURL;
+
+            std::ofstream outputFile(VIRTUAL_MEDIA_CONFIG_PATH);
+            if (outputFile.is_open()) {
+                outputFile << jsonData.dump(4);  // Write updated JSON to file
+                outputFile.close();
+            } else {
+                LogMsg(Logger::Error, "Error in writing the the file! ", VIRTUAL_MEDIA_CONFIG_PATH);
+            }
+	    // Reload the ImageURL properties from JSON to update D-Bus interface
+            instance->loadImageURLFromJson();
+        }
+        else
+        {
+            LogMsg(Logger::Error, "Slot not found in JSON. Cannot save ImageURL.", VIRTUAL_MEDIA_CONFIG_PATH);
+        }
+    }
+
+    // load the image URL to D-Bus interface from JSON configuration
+    void Interface::loadImageURLFromJson()
+    {
+        std::string slot2ImageURL, slot3ImageURL;
+
+        loadJson();
+        if (jsonData.contains("BackupImageURL") &&
+            jsonData["BackupImageURL"].contains("Slot_2") &&
+            jsonData["BackupImageURL"]["Slot_2"].contains("ImageURL"))
+            {
+                slot2ImageURL = jsonData["BackupImageURL"]["Slot_2"]["ImageURL"];
+            }
+        
+        if (jsonData.contains("BackupImageURL") &&
+            jsonData["BackupImageURL"].contains("Slot_3") &&
+            jsonData["BackupImageURL"]["Slot_3"].contains("ImageURL"))
+            {
+                slot3ImageURL = jsonData["BackupImageURL"]["Slot_3"]["ImageURL"];
+            }
+        
+        if (!vmediaImageURLInterface) {
+             vmediaImageURLInterface = server->add_interface(vmObjPath.c_str(), RmediaImageURLInterface.c_str());
+
+            // Register the property for slot 2 ImageURL 
+            vmediaImageURLInterface->register_property(
+                "Slot_2", slot2ImageURL,
+                sdbusplus::asio::PropertyPermission::readOnly);
+
+            // Register the property for slot 3 ImageURL
+            vmediaImageURLInterface->register_property(
+                "Slot_3", slot3ImageURL,
+                sdbusplus::asio::PropertyPermission::readOnly);
+
+            vmediaImageURLInterface->initialize();
+        }
+        else {
+            vmediaImageURLInterface->set_property("Slot_2", slot2ImageURL);
+            vmediaImageURLInterface->set_property("Slot_3", slot3ImageURL);
+        }
     }
 
     // Method to add the Virtual Media interface

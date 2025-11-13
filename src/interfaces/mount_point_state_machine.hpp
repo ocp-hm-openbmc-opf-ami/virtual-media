@@ -37,6 +37,8 @@ struct MountPointStateMachine
     virtual BasicState& getState() = 0;
     virtual int& getExitCode() = 0;
     virtual boost::asio::io_context& getIoc() = 0;
+    virtual std::string_view getAdditionalInfo() const = 0;
+    virtual void setAdditionalInfo(const std::string&) = 0;
 
     virtual void emitRegisterDBusEvent(
         std::shared_ptr<sdbusplus::asio::connection> bus,

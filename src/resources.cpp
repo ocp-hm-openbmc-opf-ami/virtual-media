@@ -25,7 +25,8 @@ Gadget::Gadget(interfaces::MountPointStateMachine& machine,
     {
         status = UsbGadget::configure(
             std::string(machine.getName()), machine.getConfig().nbdDevice,
-            devState, machine.getTarget() ? machine.getTarget()->rw : false);
+            devState, machine.getTarget() ? machine.getTarget()->rw : false,
+            std::string(machine.getAdditionalInfo()));
 
         if (status == -1)
         {

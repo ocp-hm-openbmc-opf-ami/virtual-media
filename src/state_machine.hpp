@@ -13,9 +13,9 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
 {
     MountPointStateMachine(boost::asio::io_context& ioc,
                            DeviceMonitor& devMonitor, const std::string& name,
-                           const Configuration::MountPoint& config) :
-        ioc{ioc},
-        name{name}, config{config}
+                           const Configuration::MountPoint& config,
+                           const std::string& additionalInfo) :
+        ioc{ioc}, name{name}, config{config}, additionalInfo{additionalInfo}
     {
         devMonitor.addDevice(config.nbdDevice);
     }
@@ -25,6 +25,10 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
     std::string_view getName() const override
     {
         return name;
+    }
+    std::string_view getAdditionalInfo() const override
+    {
+        return additionalInfo;
     }
 
     Configuration::MountPoint& getConfig() override
@@ -60,6 +64,14 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
         {
             changeState(std::move(newState));
         }
+    }
+
+    void setAdditionalInfo(const std::string& info)
+    {
+
+        additionalInfo = std::move(info);
+        LogMsg(Logger::Debug, name,
+               " Updated additionalInfo : ", additionalInfo);
     }
 
     template <class EventT>
@@ -154,6 +166,7 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
     boost::asio::io_context& ioc;
     std::string name;
     Configuration::MountPoint config;
+    std::string additionalInfo;
     std::unique_ptr<utils::NotificationWrapper> completionNotification;
 
     std::optional<Target> target;
