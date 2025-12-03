@@ -17,29 +17,28 @@ struct ActivatingState : public BasicStateT<ActivatingState>
     std::unique_ptr<BasicState> handleEvent(SubprocessStoppedEvent event);
 
     template <class AnyEvent>
-    [[noreturn]] std::unique_ptr<BasicState> handleEvent(AnyEvent event) {
+    [[noreturn]] std::unique_ptr<BasicState> handleEvent(AnyEvent event)
+    {
         LogMsg(Logger::Error, "Invalid event: ", event.eventName);
         throw sdbusplus::exception::SdBusError(EBUSY, "Resource is busy");
     }
 
-    private : std::unique_ptr<BasicState> activateProxyMode();
+  private:
+    std::unique_ptr<BasicState> activateProxyMode();
     std::unique_ptr<BasicState> activateLegacyMode();
     std::unique_ptr<BasicState> mountSmbShare();
     std::unique_ptr<BasicState> mountHttpsShare();
     std::unique_ptr<BasicState> mountNfsShare();
     std::unique_ptr<BasicState> mountLocalFile();
 
-
-    static std::unique_ptr<resource::Process>
-        spawnNbdKit(interfaces::MountPointStateMachine& machine,
-                    std::unique_ptr<utils::VolatileFile>&& secret,
-                    const std::vector<std::string>& params);
-    static std::unique_ptr<resource::Process>
-        spawnNbdKit(interfaces::MountPointStateMachine& machine,
-                    const fs::path& file);
-    static std::unique_ptr<resource::Process>
-        spawnNbdKit(interfaces::MountPointStateMachine& machine,
-                    const std::string& url);
+    static std::unique_ptr<resource::Process> spawnNbdKit(
+        interfaces::MountPointStateMachine& machine,
+        std::unique_ptr<utils::VolatileFile>&& secret,
+        const std::vector<std::string>& params);
+    static std::unique_ptr<resource::Process> spawnNbdKit(
+        interfaces::MountPointStateMachine& machine, const fs::path& file);
+    static std::unique_ptr<resource::Process> spawnNbdKit(
+        interfaces::MountPointStateMachine& machine, const std::string& url);
 
     static bool checkUrl(const std::string& urlScheme,
                          const std::string& imageUrl);
@@ -57,7 +56,7 @@ struct ActivatingState : public BasicStateT<ActivatingState>
 
     static bool isNfsUrl(const std::string& imageUrl);
     static bool getImagePathFromNfsUrl(const std::string& imageUrl,
-                                        std::string* imagePath);
+                                       std::string* imagePath);
 
     static bool isLocalFile(const std::string& imagePath);
 

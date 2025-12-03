@@ -31,8 +31,7 @@ struct ReadyState : public BasicStateT<ReadyState>
 
     ReadyState(interfaces::MountPointStateMachine& machine, const std::errc& ec,
                const std::string& message) :
-        BasicStateT(machine),
-        error{{ec, message}}
+        BasicStateT(machine), error{{ec, message}}
     {
         LogMsg(Logger::Error, machine.getName(),
                " Errno = ", static_cast<int>(ec), " : ", message);

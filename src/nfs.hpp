@@ -11,9 +11,7 @@ namespace fs = std::filesystem;
 class NfsShare
 {
   public:
-    NfsShare(const fs::path& mountDir) : mountDir(mountDir)
-    {
-    }
+    NfsShare(const fs::path& mountDir) : mountDir(mountDir) {}
 
     bool mount(const fs::path& remote, bool rw)
     {
@@ -24,8 +22,7 @@ class NfsShare
 
         LogMsg(Logger::Debug, "Trying to mount NFS remotely : ", remote);
 
-        if (parseNfsArgs(remote, remoteNfsPath, options) !=
-            true)
+        if (parseNfsArgs(remote, remoteNfsPath, options) != true)
         {
             LogMsg(Logger::Info, "NFS Mount failed when parsing remote path ",
                    remote);

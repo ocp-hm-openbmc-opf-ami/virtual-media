@@ -14,8 +14,8 @@ struct DeactivatingState : public BasicStateT<DeactivatingState>
     DeactivatingState(interfaces::MountPointStateMachine& machine,
                       std::unique_ptr<resource::Process> process,
                       std::unique_ptr<resource::Gadget> gadget, EventT event) :
-        BasicStateT(machine),
-        process(std::move(process)), gadget(std::move(gadget))
+        BasicStateT(machine), process(std::move(process)),
+        gadget(std::move(gadget))
     {
         handleEvent(std::move(event));
     }
@@ -23,10 +23,9 @@ struct DeactivatingState : public BasicStateT<DeactivatingState>
     DeactivatingState(interfaces::MountPointStateMachine& machine,
                       std::unique_ptr<resource::Process> process,
                       std::unique_ptr<resource::Gadget> gadget) :
-        BasicStateT(machine),
-        process(std::move(process)), gadget(std::move(gadget))
-    {
-    }
+        BasicStateT(machine), process(std::move(process)),
+        gadget(std::move(gadget))
+    {}
 
     std::unique_ptr<BasicState> onEnter() override
     {

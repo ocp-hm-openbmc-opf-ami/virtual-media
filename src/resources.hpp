@@ -1,8 +1,8 @@
 #pragma once
 
+#include "nfs.hpp"
 #include "smb.hpp"
 #include "system.hpp"
-#include "nfs.hpp"
 namespace interfaces
 {
 struct MountPointStateMachine;
@@ -16,8 +16,7 @@ class Error : public std::runtime_error
   public:
     Error(std::errc errorCode, std::string message) :
         std::runtime_error(message), errorCode(errorCode)
-    {
-    }
+    {}
 
     const std::errc errorCode;
 };
@@ -88,7 +87,8 @@ class Mount
 
     ~Mount()
     {
-        if (int result = ::umount2(directory->getPath().string().c_str(), MNT_DETACH | MNT_FORCE ))
+        if (int result = ::umount2(directory->getPath().string().c_str(),
+                                   MNT_DETACH | MNT_FORCE))
         {
             LogMsg(Logger::Error, result, " : Unable to unmout directory ",
                    directory->getPath());
@@ -104,7 +104,6 @@ class Mount
     std::unique_ptr<Directory> directory;
 };
 
-
 class NfsMount
 {
   public:
@@ -114,9 +113,8 @@ class NfsMount
     NfsMount& operator=(const Mount&) = delete;
     NfsMount& operator=(Mount&& other) = delete;
 
-    explicit NfsMount(
-        std::unique_ptr<Directory> directory, NfsShare& nfs,
-        const std::filesystem::path& remote, bool rw) :
+    explicit NfsMount(std::unique_ptr<Directory> directory, NfsShare& nfs,
+                      const std::filesystem::path& remote, bool rw) :
         directory(std::move(directory))
     {
         if (!nfs.mount(remote, rw))
@@ -128,7 +126,8 @@ class NfsMount
 
     ~NfsMount()
     {
-        if (int result = ::umount2(directory->getPath().string().c_str(), MNT_DETACH | MNT_FORCE ))
+        if (int result = ::umount2(directory->getPath().string().c_str(),
+                                   MNT_DETACH | MNT_FORCE))
         {
             LogMsg(Logger::Error, result, " : Unable to unmout directory ",
                    directory->getPath());
@@ -154,8 +153,7 @@ class Process
     Process& operator=(Process&& other) = delete;
     Process(interfaces::MountPointStateMachine& machine,
             std::shared_ptr<::Process> process) :
-        machine(&machine),
-        process(std::move(process))
+        machine(&machine), process(std::move(process))
     {
         if (!this->process)
         {

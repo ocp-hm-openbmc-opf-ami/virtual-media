@@ -7,9 +7,7 @@
 
 struct BasicEvent
 {
-    BasicEvent(const char* eventName) : eventName(eventName)
-    {
-    }
+    BasicEvent(const char* eventName) : eventName(eventName) {}
 
     const char* eventName;
 };
@@ -19,10 +17,9 @@ struct RegisterDbusEvent : public BasicEvent
     RegisterDbusEvent(
         std::shared_ptr<sdbusplus::asio::connection> bus,
         std::shared_ptr<sdbusplus::asio::object_server> objServer) :
-        BasicEvent(__FUNCTION__),
-        bus(std::move(bus)), objServer(std::move(objServer))
-    {
-    }
+        BasicEvent(__FUNCTION__), bus(std::move(bus)),
+        objServer(std::move(objServer))
+    {}
 
     std::shared_ptr<sdbusplus::asio::connection> bus;
     std::shared_ptr<sdbusplus::asio::object_server> objServer;
@@ -32,10 +29,8 @@ struct MountEvent : public BasicEvent
 {
     explicit MountEvent(
         std::optional<interfaces::MountPointStateMachine::Target> target) :
-        BasicEvent(__FUNCTION__),
-        target(std::move(target))
-    {
-    }
+        BasicEvent(__FUNCTION__), target(std::move(target))
+    {}
 
     MountEvent(const MountEvent&) = delete;
 
@@ -59,24 +54,19 @@ struct MountEvent : public BasicEvent
 
 struct UnmountEvent : public BasicEvent
 {
-    UnmountEvent() : BasicEvent(__FUNCTION__)
-    {
-    }
+    UnmountEvent() : BasicEvent(__FUNCTION__) {}
 };
 
 struct SubprocessStoppedEvent : public BasicEvent
 {
-    SubprocessStoppedEvent() : BasicEvent(__FUNCTION__)
-    {
-    }
+    SubprocessStoppedEvent() : BasicEvent(__FUNCTION__) {}
 };
 
 struct UdevStateChangeEvent : public BasicEvent
 {
     explicit UdevStateChangeEvent(const StateChange& devState) :
         BasicEvent(__FUNCTION__), devState{devState}
-    {
-    }
+    {}
 
     StateChange devState;
 };

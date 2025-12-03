@@ -1,6 +1,8 @@
 #include "activating_state.hpp"
 
 #include "active_state.hpp"
+#include "credentials.hpp"
+#include "vm_interface.hpp"
 
 #include <sys/mount.h>
 
@@ -12,21 +14,19 @@
 #include <boost/container/flat_set.hpp>
 #include <boost/process.hpp>
 #include <boost/system/detail/error_code.hpp>
-#include <filesystem>
-#include <format>
-#include <memory>
 #include <nlohmann/json.hpp>
 #include <sdbusplus/asio/connection.hpp>
 #include <sdbusplus/asio/object_server.hpp>
-#include "credentials.hpp"
-#include "vm_interface.hpp"
+
+#include <filesystem>
+#include <format>
+#include <memory>
 boost::asio::io_context ioContext[2];
 std::shared_ptr<Credentials> creds[2];
 
 ActivatingState::ActivatingState(interfaces::MountPointStateMachine& machine) :
     BasicStateT(machine)
-{
-}
+{}
 
 std::unique_ptr<BasicState> ActivatingState::onEnter()
 {
@@ -40,25 +40,31 @@ std::unique_ptr<BasicState> ActivatingState::onEnter()
     return activateLegacyMode();
 }
 
-std::unique_ptr<BasicState>
-    ActivatingState::handleEvent(UdevStateChangeEvent event)
+std::unique_ptr<BasicState> ActivatingState::handleEvent(
+    UdevStateChangeEvent event)
 {
     if (event.devState == StateChange::inserted)
     {
         gadget = std::make_unique<resource::Gadget>(machine, event.devState);
-        if (gadget->getStatus() == -1) {
-            LogMsg(Logger::Error, "Skipping redirection: image size too small for ", machine.getName());
-            return std::make_unique<ReadyState>(machine, std::errc::invalid_argument, "Image size too small, skipping redirection");
+        if (gadget->getStatus() == -1)
+        {
+            LogMsg(Logger::Error,
+                   "Skipping redirection: image size too small for ",
+                   machine.getName());
+            return std::make_unique<ReadyState>(
+                machine, std::errc::invalid_argument,
+                "Image size too small, skipping redirection");
         }
-        return std::make_unique<ActiveState>(machine, std::move(process), std::move(gadget));
+        return std::make_unique<ActiveState>(machine, std::move(process),
+                                             std::move(gadget));
     }
 
     return std::make_unique<DeactivatingState>(machine, std::move(process),
                                                std::move(gadget), event);
 }
 
-std::unique_ptr<BasicState> ActivatingState::handleEvent([
-    [maybe_unused]] SubprocessStoppedEvent event)
+std::unique_ptr<BasicState> ActivatingState::handleEvent(
+    [[maybe_unused]] SubprocessStoppedEvent event)
 {
     LogMsg(Logger::Error, "Process ended prematurely");
     return std::make_unique<ReadyState>(machine, std::errc::connection_refused,
@@ -105,9 +111,10 @@ std::unique_ptr<BasicState> ActivatingState::activateLegacyMode()
            " Mount requested on address: ", machine.getTarget()->imgUrl,
            " ; RW: ", machine.getTarget()->rw);
     LogMsg(Logger::Debug,
-       "Additional Info [from Client]: ", machine.getAdditionalInfo());
+           "Additional Info [from Client]: ", machine.getAdditionalInfo());
     // Save the image URL to JSON configuration
-    vm::Interface::saveImageURLToJson(machine.getTarget()->imgUrl, std::string(machine.getName()));
+    vm::Interface::saveImageURLToJson(machine.getTarget()->imgUrl,
+                                      std::string(machine.getName()));
 
     std::filesystem::path socketPath(machine.getConfig().unixSocket);
     if (!std::filesystem::exists(socketPath.parent_path()))
@@ -138,13 +145,16 @@ std::unique_ptr<BasicState> ActivatingState::activateLegacyMode()
                 "Failed to set parent permissions directory for socket");
         }
     }
-    
+
     int slotNumber = extractSlotNumber(std::string(machine.getName()));
-    //To fix the Coverity issue: Negative Array Index Read
-       if (slotNumber < 0) {
-      LogMsg(Logger::Error, "Unable to process further because slotNumber is Inavlid");
-       return std::make_unique<ReadyState>(machine, std::errc::connection_refused,
-                                        "Unable to process further because slotNumber is Inavlid");
+    // To fix the Coverity issue: Negative Array Index Read
+    if (slotNumber < 0)
+    {
+        LogMsg(Logger::Error,
+               "Unable to process further because slotNumber is Inavlid");
+        return std::make_unique<ReadyState>(
+            machine, std::errc::connection_refused,
+            "Unable to process further because slotNumber is Inavlid");
     }
 
     if (isLocalFile(machine.getTarget()->imgUrl))
@@ -248,8 +258,10 @@ std::unique_ptr<BasicState> ActivatingState::mountNfsShare()
                "\n Remote parent: ", remoteParent,
                "\n Local file: ", localFile);
 
-        machine.getTarget()->mountPointNfs = std::make_unique<resource::NfsMount>(
-            std::move(mountDir), nfs, remoteParent, machine.getTarget()->rw);
+        machine.getTarget()->mountPointNfs =
+            std::make_unique<resource::NfsMount>(
+                std::move(mountDir), nfs, remoteParent,
+                machine.getTarget()->rw);
 
         process = spawnNbdKit(machine, localFile);
         if (!process)
@@ -267,11 +279,10 @@ std::unique_ptr<BasicState> ActivatingState::mountNfsShare()
     }
 }
 
-
-std::unique_ptr<resource::Process>
-    ActivatingState::spawnNbdKit(interfaces::MountPointStateMachine& machine,
-                                 std::unique_ptr<utils::VolatileFile>&& secret,
-                                 const std::vector<std::string>& params)
+std::unique_ptr<resource::Process> ActivatingState::spawnNbdKit(
+    interfaces::MountPointStateMachine& machine,
+    std::unique_ptr<utils::VolatileFile>&& secret,
+    const std::vector<std::string>& params)
 {
     // Investigate
     auto process = std::make_unique<resource::Process>(
@@ -301,12 +312,10 @@ std::unique_ptr<resource::Process>
 
     std::vector<std::string> args = {
         // Listen for client on this unix socket...
-        "--unix",
-        machine.getConfig().unixSocket,
+        "--unix", machine.getConfig().unixSocket,
 
         // ... then connect nbd-client to served image
-        "--run",
-        nbdClient,
+        "--run", nbdClient,
 
 #if VM_VERBOSE_NBDKIT_LOGS
         "--verbose", // swarm of debug logs - only for brave souls
@@ -336,9 +345,8 @@ std::unique_ptr<resource::Process>
     return process;
 }
 
-std::unique_ptr<resource::Process>
-    ActivatingState::spawnNbdKit(interfaces::MountPointStateMachine& machine,
-                                 const fs::path& file)
+std::unique_ptr<resource::Process> ActivatingState::spawnNbdKit(
+    interfaces::MountPointStateMachine& machine, const fs::path& file)
 {
     return spawnNbdKit(machine, {},
                        {// Use file plugin ...
@@ -347,17 +355,15 @@ std::unique_ptr<resource::Process>
                         "file=" + file.string()});
 }
 
-std::unique_ptr<resource::Process>
-    ActivatingState::spawnNbdKit(interfaces::MountPointStateMachine& machine,
-                                 const std::string& url)
+std::unique_ptr<resource::Process> ActivatingState::spawnNbdKit(
+    interfaces::MountPointStateMachine& machine, const std::string& url)
 {
     std::unique_ptr<utils::VolatileFile> secret;
     std::vector<std::string> params = {
         // Use curl plugin ...
         "curl",
         // ... to mount http resource at url
-       "sslverify=false",
-        "url=" + url,
+        "sslverify=false", "url=" + url,
         // custom OpenBMC path for CA
         "cainfo=", "capath=/etc/ssl/certs/authority", "ssl-version=tlsv1.2",
         "followlocation=false",
@@ -421,7 +427,7 @@ bool ActivatingState::isNfsUrl(const std::string& imageUrl)
 }
 
 bool ActivatingState::getImagePathFromNfsUrl(const std::string& imageUrl,
-                                              std::string* imagePath)
+                                             std::string* imagePath)
 {
     return getImagePathFromUrl("nfs://", imageUrl, imagePath);
 }

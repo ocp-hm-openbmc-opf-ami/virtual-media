@@ -5,15 +5,16 @@
 #include <sys/mount.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/process/async_pipe.hpp>
 #include <boost/type_traits/has_dereference.hpp>
+#include <sdbusplus/asio/object_server.hpp>
+
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <optional>
-#include <sdbusplus/asio/object_server.hpp>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -36,8 +37,7 @@ class Credentials
   public:
     Credentials(std::string&& user, std::string&& password) :
         userBuf(std::move(user)), passBuf(std::move(password))
-    {
-    }
+    {}
 
     ~Credentials()
     {
@@ -114,8 +114,7 @@ class CredentialsProvider
 
     CredentialsProvider(std::string&& user, std::string&& password) :
         credentials(std::move(user), std::move(password))
-    {
-    }
+    {}
 
     void escapeCommas()
     {
@@ -156,8 +155,7 @@ class NamedPipe
     NamedPipe(boost::asio::io_context& io, const std::string name,
               Buffer&& buffer) :
         name(name), impl(io, name), buffer{std::move(buffer)}
-    {
-    }
+    {}
 
     ~NamedPipe()
     {
@@ -232,7 +230,7 @@ class VolatileFile
     class FileObject
     {
       public:
-        explicit FileObject(int fd) : fd(fd){};
+        explicit FileObject(int fd) : fd(fd) {};
         FileObject() = delete;
         FileObject(const FileObject&) = delete;
         FileObject& operator=(const FileObject&) = delete;
@@ -294,7 +292,7 @@ class SignalSender
     SignalSender(std::shared_ptr<sdbusplus::asio::connection> con,
                  const std::string& obj, const std::string& iface,
                  const std::string& name) :
-        con(con), interface(iface), object(obj), name(name){};
+        con(con), interface(iface), object(obj), name(name) {};
 
     SignalSender() = delete;
     SignalSender(const SignalSender&) = delete;
@@ -324,8 +322,7 @@ class NotificationWrapper
     NotificationWrapper(std::unique_ptr<SignalSender> signal,
                         std::unique_ptr<boost::asio::steady_timer> timer) :
         signal(std::move(signal)), timer(std::move(timer))
-    {
-    }
+    {}
 
     void start(std::function<void(const boost::system::error_code&)>&& handler,
                const std::chrono::seconds& duration)

@@ -15,12 +15,13 @@
 #include <boost/container/flat_map.hpp>
 #include <boost/container/flat_set.hpp>
 #include <boost/process.hpp>
-#include <filesystem>
-#include <iostream>
-#include <memory>
 #include <nlohmann/json.hpp>
 #include <sdbusplus/asio/connection.hpp>
 #include <sdbusplus/asio/object_server.hpp>
+
+#include <filesystem>
+#include <iostream>
+#include <memory>
 
 std::chrono::seconds Configuration::inactivityTimeout;
 
@@ -29,8 +30,7 @@ class App
   public:
     App(boost::asio::io_context& ioc, const Configuration& config,
         sd_bus* custom_bus = nullptr) :
-        ioc(ioc),
-        devMonitor(ioc), config(config), dbusMonitor()
+        ioc(ioc), devMonitor(ioc), config(config), dbusMonitor()
     {
         if (!custom_bus)
         {
@@ -49,7 +49,7 @@ class App
         for (const auto& [name, entry] : config.mountPoints)
         {
             mpsm[name] = std::make_shared<MountPointStateMachine>(
-                ioc, devMonitor, name, entry,std::string());
+                ioc, devMonitor, name, entry, std::string());
             mpsm[name]->emitRegisterDBusEvent(bus, objServer);
         }
 
@@ -106,8 +106,9 @@ int main()
 
     boost::asio::io_context ioc;
     boost::asio::signal_set signals(ioc, SIGINT, SIGTERM);
-    signals.async_wait(
-        [&ioc](const boost::system::error_code&, const int&) { ioc.stop(); });
+    signals.async_wait([&ioc](const boost::system::error_code&, const int&) {
+        ioc.stop();
+    });
 
     sd_bus* b = nullptr;
 #if defined(CUSTOM_DBUS_PATH)

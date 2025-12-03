@@ -5,8 +5,9 @@
 
 #include <sys/mount.h>
 
-#include <memory>
 #include <sdbusplus/asio/connection.hpp>
+
+#include <memory>
 #include <string>
 #include <system_error>
 
@@ -18,7 +19,7 @@ struct InitialState : public BasicStateT<InitialState>
     }
 
     InitialState(interfaces::MountPointStateMachine& machine) :
-        BasicStateT(machine){};
+        BasicStateT(machine) {};
 
     std::unique_ptr<BasicState> handleEvent(RegisterDbusEvent event)
     {
@@ -57,13 +58,14 @@ struct InitialState : public BasicStateT<InitialState>
     }
 
   private:
-
-    inline static std::map<std::string, interfaces::MountPointStateMachine*> allMountPoints;
+    inline static std::map<std::string, interfaces::MountPointStateMachine*>
+        allMountPoints;
     inline static bool globalLocalServiceCreated;
-    inline static std::shared_ptr<sdbusplus::asio::object_server> globalObjServer;
+    inline static std::shared_ptr<sdbusplus::asio::object_server>
+        globalObjServer;
 
-    static std::string
-        getObjectPath(interfaces::MountPointStateMachine& machine)
+    static std::string getObjectPath(
+        interfaces::MountPointStateMachine& machine)
     {
         LogMsg(Logger::Debug, "getObjectPath entry()");
         std::string objPath;
@@ -180,8 +182,8 @@ struct InitialState : public BasicStateT<InitialState>
             "WriteProtected", bool(true),
             []([[maybe_unused]] const bool& req,
                [[maybe_unused]] bool& property) { return 0; },
-            [&target =
-                 machine.getTarget()]([[maybe_unused]] const bool& property) {
+            [&target = machine.getTarget()](
+                [[maybe_unused]] const bool& property) {
                 if (target)
                 {
                     return !target->rw;
@@ -239,10 +241,10 @@ struct InitialState : public BasicStateT<InitialState>
             using optional_fd = std::variant<int, unix_fd>;
 
             iface->register_method(
-                "Mount", [&machine = machine](boost::asio::yield_context yield,
-                                              std::string imgUrl, bool rw,
-                                              optional_fd fd,
-                                              std::string additionalInfo) {
+                "Mount",
+                [&machine = machine](
+                    boost::asio::yield_context yield, std::string imgUrl,
+                    bool rw, optional_fd fd, std::string additionalInfo) {
                     if (machine.getState().get_if<ReadyState>())
                     {
                         machine.setAdditionalInfo(additionalInfo);
@@ -260,7 +262,7 @@ struct InitialState : public BasicStateT<InitialState>
                     }
 
                     interfaces::MountPointStateMachine::Target target = {
-                        imgUrl, rw, nullptr, nullptr,nullptr};
+                        imgUrl, rw, nullptr, nullptr, nullptr};
 
                     if (std::holds_alternative<unix_fd>(fd))
                     {
@@ -410,8 +412,8 @@ struct InitialState : public BasicStateT<InitialState>
                 {
                     LogMsg(Logger::Error,
                            "Local file does not exist: ", localPath);
-                    throw sdbusplus::exception::SdBusError(ENOENT,
-                         ("Local file not found: " + localPath).c_str());
+                    throw sdbusplus::exception::SdBusError(
+                        ENOENT, ("Local file not found: " + localPath).c_str());
                 }
 
                 // Validate it's a regular file
@@ -435,7 +437,6 @@ struct InitialState : public BasicStateT<InitialState>
                         if (machine->getState().get_if<ReadyState>() &&
                             !machine->getTarget().has_value())
                         {
-
                             LogMsg(Logger::Info,
                                    "Dynamically assigned slot: ", slotName,
                                    " for local file: ", localPath);
@@ -454,14 +455,13 @@ struct InitialState : public BasicStateT<InitialState>
                     }
                 }
 
-                throw sdbusplus::exception::SdBusError(EBUSY,
-                    "No available slots for local mounting");
+                throw sdbusplus::exception::SdBusError(
+                    EBUSY, "No available slots for local mounting");
             });
 
         // **LMEDIA Unmount Method**
         localIface->register_method("Unmount", []() -> bool {
-            LogMsg(Logger::Info,
-                   "[Local]: Unmount requested ");
+            LogMsg(Logger::Info, "[Local]: Unmount requested ");
 
             std::vector<std::string> slotOrder = {"Slot_0", "Slot_1", "Slot_2",
                                                   "Slot_3"};
@@ -530,7 +530,7 @@ struct InitialState : public BasicStateT<InitialState>
             "ListAvailableSlots", []() -> std::vector<std::string> {
                 std::vector<std::string> availableSlots;
                 std::vector<std::string> slotOrder = {"Slot_0", "Slot_1",
-                                                     "Slot_2", "Slot_3"};
+                                                      "Slot_2", "Slot_3"};
 
                 for (const auto& slotName : slotOrder)
                 {

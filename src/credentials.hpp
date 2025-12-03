@@ -1,6 +1,6 @@
 #pragma once
 
-//#include "logging.hpp"
+// #include "logging.hpp"
 
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/connect_pipe.hpp>
@@ -17,7 +17,8 @@ class Credentials
 {
   public:
     explicit Credentials(boost::asio::io_context& io, std::string url = "",
-                         bool rw_status = false, std::string additionalInfo = "") :
+                         bool rw_status = false,
+                         std::string additionalInfo = "") :
         impl(io), read(io), url(std::move(url)), rw_status(rw_status),
         additionalInfo(std::move(additionalInfo))
     {
@@ -25,7 +26,7 @@ class Credentials
         boost::asio::connect_pipe(read, impl, ec);
         if (ec)
         {
-           // BMCWEB_LOG_CRITICAL("Failed to connect pipe {}", ec.what());
+            // BMCWEB_LOG_CRITICAL("Failed to connect pipe {}", ec.what());
         }
     }
 
@@ -59,9 +60,18 @@ class Credentials
                                  std::forward<WriteHandler>(handler));
     }
 
-    std::string getUrl() const { return url; }
-    bool getRwStatus() const { return rw_status; }
-    std::string getAdditionalInfo() const { return additionalInfo; }
+    std::string getUrl() const
+    {
+        return url;
+    }
+    bool getRwStatus() const
+    {
+        return rw_status;
+    }
+    std::string getAdditionalInfo() const
+    {
+        return additionalInfo;
+    }
 
     boost::asio::writable_pipe impl;
     boost::asio::readable_pipe read;

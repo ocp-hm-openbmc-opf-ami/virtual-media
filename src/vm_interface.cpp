@@ -1,9 +1,12 @@
-#include <iostream>
-#include <fstream>
-#include "logger.hpp"
 #include "vm_interface.hpp"
-#include <nlohmann/json.hpp>
+
+#include "logger.hpp"
 #include "system.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <fstream>
+#include <iostream>
 
 #define MIN_RETRY_COUNT 3
 #define MAX_RETRY_COUNT 6
@@ -16,208 +19,234 @@ using json = nlohmann::json;
 
 namespace vm
 {
-    // Declare a global or class-level json object to store the JSON data
-    json jsonData = {}; // Initialize with an empty JSON object
+// Declare a global or class-level json object to store the JSON data
+json jsonData = {}; // Initialize with an empty JSON object
 
-    int Interface :: loadJson() {
-        try 
+int Interface ::loadJson()
+{
+    try
+    {
+        std::ifstream f(VIRTUAL_MEDIA_CONFIG_PATH);
+        if (!f.is_open())
         {
-            std::ifstream f(VIRTUAL_MEDIA_CONFIG_PATH);
-            if (!f.is_open()) {
-                throw std::runtime_error("Error opening JSON file");
-            }
-
-            jsonData = json::parse(f);
-
-            if (jsonData.is_null()) {
-                throw std::runtime_error("JSON data is empty");
-            }
-        } catch (const std::exception &e) {
-            LogMsg(Logger::Error, e.what());
-            return -1;
-        }
-        return 0;
-    }
-
-    // Constructor to initialize the object server and add the interface
-    Interface::Interface(std::shared_ptr<sdbusplus::asio::object_server> objServer) : server(objServer)
-    {
-	instance = this;	
-    }
-    Interface* Interface::instance = nullptr;
-
-    // Method to add interfaces
-    void Interface::addInterfaces()
-    {
-        loadJson();
-        addRmediaInterface();
-	loadImageURLFromJson();
-    }
-
-    //save the image URL to JSON configuration
-    void Interface::saveImageURLToJson(const std::string& imageURL, const std::string& slotKey)
-    {
-        if (slotKey != "Slot_2" && slotKey != "Slot_3") {
-	    LogMsg(Logger::Debug," Unsupported slot: ", slotKey.c_str());
-	    return;
+            throw std::runtime_error("Error opening JSON file");
         }
 
-        loadJson();
-        if (jsonData.contains("BackupImageURL") &&
-	    jsonData["BackupImageURL"].contains(slotKey))
-        {
-            jsonData["BackupImageURL"][slotKey]["ImageURL"] = imageURL;
+        jsonData = json::parse(f);
 
-            std::ofstream outputFile(VIRTUAL_MEDIA_CONFIG_PATH);
-            if (outputFile.is_open()) {
-                outputFile << jsonData.dump(4);  // Write updated JSON to file
-                outputFile.close();
-            } else {
-                LogMsg(Logger::Error, "Error in writing the the file! ", VIRTUAL_MEDIA_CONFIG_PATH);
-            }
-	    // Reload the ImageURL properties from JSON to update D-Bus interface
-            instance->loadImageURLFromJson();
+        if (jsonData.is_null())
+        {
+            throw std::runtime_error("JSON data is empty");
+        }
+    }
+    catch (const std::exception& e)
+    {
+        LogMsg(Logger::Error, e.what());
+        return -1;
+    }
+    return 0;
+}
+
+// Constructor to initialize the object server and add the interface
+Interface::Interface(
+    std::shared_ptr<sdbusplus::asio::object_server> objServer) :
+    server(objServer)
+{
+    instance = this;
+}
+Interface* Interface::instance = nullptr;
+
+// Method to add interfaces
+void Interface::addInterfaces()
+{
+    loadJson();
+    addRmediaInterface();
+    loadImageURLFromJson();
+}
+
+// save the image URL to JSON configuration
+void Interface::saveImageURLToJson(const std::string& imageURL,
+                                   const std::string& slotKey)
+{
+    if (slotKey != "Slot_2" && slotKey != "Slot_3")
+    {
+        LogMsg(Logger::Debug, " Unsupported slot: ", slotKey.c_str());
+        return;
+    }
+
+    loadJson();
+    if (jsonData.contains("BackupImageURL") &&
+        jsonData["BackupImageURL"].contains(slotKey))
+    {
+        jsonData["BackupImageURL"][slotKey]["ImageURL"] = imageURL;
+
+        std::ofstream outputFile(VIRTUAL_MEDIA_CONFIG_PATH);
+        if (outputFile.is_open())
+        {
+            outputFile << jsonData.dump(4); // Write updated JSON to file
+            outputFile.close();
         }
         else
         {
-            LogMsg(Logger::Error, "Slot not found in JSON. Cannot save ImageURL.", VIRTUAL_MEDIA_CONFIG_PATH);
+            LogMsg(Logger::Error, "Error in writing the the file! ",
+                   VIRTUAL_MEDIA_CONFIG_PATH);
         }
+        // Reload the ImageURL properties from JSON to update D-Bus interface
+        instance->loadImageURLFromJson();
+    }
+    else
+    {
+        LogMsg(Logger::Error, "Slot not found in JSON. Cannot save ImageURL.",
+               VIRTUAL_MEDIA_CONFIG_PATH);
+    }
+}
+
+// load the image URL to D-Bus interface from JSON configuration
+void Interface::loadImageURLFromJson()
+{
+    std::string slot2ImageURL, slot3ImageURL;
+
+    loadJson();
+    if (jsonData.contains("BackupImageURL") &&
+        jsonData["BackupImageURL"].contains("Slot_2") &&
+        jsonData["BackupImageURL"]["Slot_2"].contains("ImageURL"))
+    {
+        slot2ImageURL = jsonData["BackupImageURL"]["Slot_2"]["ImageURL"];
     }
 
-    // load the image URL to D-Bus interface from JSON configuration
-    void Interface::loadImageURLFromJson()
+    if (jsonData.contains("BackupImageURL") &&
+        jsonData["BackupImageURL"].contains("Slot_3") &&
+        jsonData["BackupImageURL"]["Slot_3"].contains("ImageURL"))
     {
-        std::string slot2ImageURL, slot3ImageURL;
-
-        loadJson();
-        if (jsonData.contains("BackupImageURL") &&
-            jsonData["BackupImageURL"].contains("Slot_2") &&
-            jsonData["BackupImageURL"]["Slot_2"].contains("ImageURL"))
-            {
-                slot2ImageURL = jsonData["BackupImageURL"]["Slot_2"]["ImageURL"];
-            }
-        
-        if (jsonData.contains("BackupImageURL") &&
-            jsonData["BackupImageURL"].contains("Slot_3") &&
-            jsonData["BackupImageURL"]["Slot_3"].contains("ImageURL"))
-            {
-                slot3ImageURL = jsonData["BackupImageURL"]["Slot_3"]["ImageURL"];
-            }
-        
-        if (!vmediaImageURLInterface) {
-             vmediaImageURLInterface = server->add_interface(vmObjPath.c_str(), RmediaImageURLInterface.c_str());
-
-            // Register the property for slot 2 ImageURL 
-            vmediaImageURLInterface->register_property(
-                "Slot_2", slot2ImageURL,
-                sdbusplus::asio::PropertyPermission::readOnly);
-
-            // Register the property for slot 3 ImageURL
-            vmediaImageURLInterface->register_property(
-                "Slot_3", slot3ImageURL,
-                sdbusplus::asio::PropertyPermission::readOnly);
-
-            vmediaImageURLInterface->initialize();
-        }
-        else {
-            vmediaImageURLInterface->set_property("Slot_2", slot2ImageURL);
-            vmediaImageURLInterface->set_property("Slot_3", slot3ImageURL);
-        }
+        slot3ImageURL = jsonData["BackupImageURL"]["Slot_3"]["ImageURL"];
     }
 
-    // Method to add the Virtual Media interface
-    void Interface::addRmediaInterface()
+    if (!vmediaImageURLInterface)
     {
-        vmediaInterface = server->add_interface(vmObjPath.c_str(), RmediaInterface.c_str());
+        vmediaImageURLInterface = server->add_interface(
+            vmObjPath.c_str(), RmediaImageURLInterface.c_str());
 
-        RetryCount    = jsonData["RetryCount"];
-        RetryInterval = jsonData["RetryInterval"];
-
-        // Register the property for RetryCount
-        vmediaInterface->register_property(
-            "RetryCount", RetryCount,
+        // Register the property for slot 2 ImageURL
+        vmediaImageURLInterface->register_property(
+            "Slot_2", slot2ImageURL,
             sdbusplus::asio::PropertyPermission::readOnly);
 
-        // Register the property for RetryInterval
-        vmediaInterface->register_property(
-            "RetryInterval", RetryInterval,
+        // Register the property for slot 3 ImageURL
+        vmediaImageURLInterface->register_property(
+            "Slot_3", slot3ImageURL,
             sdbusplus::asio::PropertyPermission::readOnly);
 
-        // Register the method to set both RetryCount and RetryInterval
-        vmediaInterface->register_method("SetAll", [this](unsigned int RetryCount, unsigned int RetryInterval) {
-           return SetAll(RetryCount, RetryInterval);
-        });
-
-        // Register the method to get both RetryCount and RetryInterval
-        vmediaInterface->register_method("GetAll", [this]() {
-            return GetAll();
-        });
-
-        // Initialize the interface to finalize its setup
-        vmediaInterface->initialize();
+        vmediaImageURLInterface->initialize();
     }
-
-    // Method to set the retry parameters with validation
-    std::string Interface::SetAll(unsigned int newRetryCount, unsigned int newRetryInterval)
+    else
     {
-        std::string status = "Unknown";
-        
-        // Validate the new values for retry count and interval
-        if ((newRetryCount < MIN_RETRY_COUNT || newRetryCount > MAX_RETRY_COUNT) || (newRetryInterval < MIN_RETRY_INTERVAL || newRetryInterval > MAX_RETRY_INTERVAL))
-        {
-            status = "Error: RetryCount must be set between 3 and 6. RetryInterval should be configured between 15 and 30.";
-            return status;
-        }
+        vmediaImageURLInterface->set_property("Slot_2", slot2ImageURL);
+        vmediaImageURLInterface->set_property("Slot_3", slot3ImageURL);
+    }
+}
 
-        // Check if there is any change in the values
-        if (RetryCount == newRetryCount && RetryInterval == newRetryInterval)
-        {
-            status = "Success";
-            return status;
-        }
+// Method to add the Virtual Media interface
+void Interface::addRmediaInterface()
+{
+    vmediaInterface =
+        server->add_interface(vmObjPath.c_str(), RmediaInterface.c_str());
 
-        // Update the member variables
-        RetryCount = newRetryCount;
-        RetryInterval = newRetryInterval;
+    RetryCount = jsonData["RetryCount"];
+    RetryInterval = jsonData["RetryInterval"];
 
-        // Update D-Bus properties if the interface is available
-        if (vmediaInterface)
-        {
-            vmediaInterface->set_property("RetryCount", RetryCount);
-            vmediaInterface->set_property("RetryInterval", RetryInterval);
-            status = "Success";
-        }
+    // Register the property for RetryCount
+    vmediaInterface->register_property(
+        "RetryCount", RetryCount,
+        sdbusplus::asio::PropertyPermission::readOnly);
 
-        // Load JSON data only if needed
-        try
-        {
-           loadJson();  // Load JSON only once
+    // Register the property for RetryInterval
+    vmediaInterface->register_property(
+        "RetryInterval", RetryInterval,
+        sdbusplus::asio::PropertyPermission::readOnly);
 
-            // Update JSON only if both values differ
-            if (jsonData["RetryCount"] != RetryCount || jsonData["RetryInterval"] != RetryInterval)
-            {
-                jsonData["RetryCount"] = RetryCount;
-                jsonData["RetryInterval"] = RetryInterval;
-                std::ofstream outputFile(VIRTUAL_MEDIA_CONFIG_PATH);
-                if (outputFile.is_open()) {
-                    outputFile << jsonData.dump(4);  // Write updated JSON to file
-                    outputFile.close();
-                } else {
-                    LogMsg(Logger::Error, "Error in writing the the file! ", VIRTUAL_MEDIA_CONFIG_PATH);
-                }
-            }
-        }
-        catch (const std::exception& e)
-        {
-            LogMsg(Logger::Error, "Error loading JSON file:!", e.what());
-        }
+    // Register the method to set both RetryCount and RetryInterval
+    vmediaInterface->register_method(
+        "SetAll", [this](unsigned int RetryCount, unsigned int RetryInterval) {
+            return SetAll(RetryCount, RetryInterval);
+        });
+
+    // Register the method to get both RetryCount and RetryInterval
+    vmediaInterface->register_method("GetAll", [this]() { return GetAll(); });
+
+    // Initialize the interface to finalize its setup
+    vmediaInterface->initialize();
+}
+
+// Method to set the retry parameters with validation
+std::string Interface::SetAll(unsigned int newRetryCount,
+                              unsigned int newRetryInterval)
+{
+    std::string status = "Unknown";
+
+    // Validate the new values for retry count and interval
+    if ((newRetryCount < MIN_RETRY_COUNT || newRetryCount > MAX_RETRY_COUNT) ||
+        (newRetryInterval < MIN_RETRY_INTERVAL ||
+         newRetryInterval > MAX_RETRY_INTERVAL))
+    {
+        status =
+            "Error: RetryCount must be set between 3 and 6. RetryInterval should be configured between 15 and 30.";
         return status;
     }
 
-    // Method to get the retry parameters
-    std::tuple<unsigned int, unsigned int> Interface::GetAll() const
+    // Check if there is any change in the values
+    if (RetryCount == newRetryCount && RetryInterval == newRetryInterval)
     {
-        return std::make_tuple(RetryCount, RetryInterval);
+        status = "Success";
+        return status;
     }
+
+    // Update the member variables
+    RetryCount = newRetryCount;
+    RetryInterval = newRetryInterval;
+
+    // Update D-Bus properties if the interface is available
+    if (vmediaInterface)
+    {
+        vmediaInterface->set_property("RetryCount", RetryCount);
+        vmediaInterface->set_property("RetryInterval", RetryInterval);
+        status = "Success";
+    }
+
+    // Load JSON data only if needed
+    try
+    {
+        loadJson(); // Load JSON only once
+
+        // Update JSON only if both values differ
+        if (jsonData["RetryCount"] != RetryCount ||
+            jsonData["RetryInterval"] != RetryInterval)
+        {
+            jsonData["RetryCount"] = RetryCount;
+            jsonData["RetryInterval"] = RetryInterval;
+            std::ofstream outputFile(VIRTUAL_MEDIA_CONFIG_PATH);
+            if (outputFile.is_open())
+            {
+                outputFile << jsonData.dump(4); // Write updated JSON to file
+                outputFile.close();
+            }
+            else
+            {
+                LogMsg(Logger::Error, "Error in writing the the file! ",
+                       VIRTUAL_MEDIA_CONFIG_PATH);
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        LogMsg(Logger::Error, "Error loading JSON file:!", e.what());
+    }
+    return status;
+}
+
+// Method to get the retry parameters
+std::tuple<unsigned int, unsigned int> Interface::GetAll() const
+{
+    return std::make_tuple(RetryCount, RetryInterval);
+}
 
 } // namespace vm

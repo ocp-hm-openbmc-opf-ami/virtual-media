@@ -4,9 +4,10 @@
 #include "utils.hpp"
 
 #include <boost/asio/steady_timer.hpp>
+#include <sdbusplus/asio/object_server.hpp>
+
 #include <functional>
 #include <memory>
-#include <sdbusplus/asio/object_server.hpp>
 #include <system_error>
 
 struct MountPointStateMachine : public interfaces::MountPointStateMachine
@@ -68,7 +69,6 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
 
     void setAdditionalInfo(const std::string& info)
     {
-
         additionalInfo = std::move(info);
         LogMsg(Logger::Debug, name,
                " Updated additionalInfo : ", additionalInfo);
@@ -121,10 +121,10 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
         }
     }
 
-    virtual void
-        notificationInitialize(std::shared_ptr<sdbusplus::asio::connection> con,
-                               const std::string& svc, const std::string& iface,
-                               const std::string& name) override
+    virtual void notificationInitialize(
+        std::shared_ptr<sdbusplus::asio::connection> con,
+        const std::string& svc, const std::string& iface,
+        const std::string& name) override
     {
         auto signal = std::make_unique<utils::SignalSender>(std::move(con), svc,
                                                             iface, name);

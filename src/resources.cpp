@@ -9,7 +9,7 @@ Process::~Process()
 {
     if (spawned)
     {
-        process->stop([& machine = *machine] {
+        process->stop([&machine = *machine] {
             boost::asio::post(machine.getIoc(), [&machine]() {
                 machine.emitSubprocessStoppedEvent();
             });
@@ -18,8 +18,7 @@ Process::~Process()
 }
 
 Gadget::Gadget(interfaces::MountPointStateMachine& machine,
-               StateChange devState) :
-    machine(&machine)
+               StateChange devState) : machine(&machine)
 {
     try
     {

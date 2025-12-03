@@ -6,8 +6,7 @@
 struct BasicState
 {
     BasicState(interfaces::MountPointStateMachine& machine) : machine{machine}
-    {
-    }
+    {}
     virtual ~BasicState() = default;
 
     BasicState(const BasicState& state) = delete;
@@ -38,8 +37,7 @@ struct BasicStateT : public BasicState
 {
     BasicStateT(interfaces::MountPointStateMachine& machine) :
         BasicState(machine)
-    {
-    }
+    {}
 
     ~BasicStateT()
     {

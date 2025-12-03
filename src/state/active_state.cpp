@@ -5,8 +5,8 @@
 ActiveState::ActiveState(interfaces::MountPointStateMachine& machine,
                          std::unique_ptr<resource::Process> process,
                          std::unique_ptr<resource::Gadget> gadget) :
-    BasicStateT(machine),
-    process(std::move(process)), gadget(std::move(gadget)){};
+    BasicStateT(machine), process(std::move(process)),
+    gadget(std::move(gadget)) {};
 
 ActiveState::ActiveState(interfaces::MountPointStateMachine& machine) :
     BasicStateT(machine)
@@ -62,14 +62,12 @@ std::unique_ptr<BasicState> ActiveState::onEnter()
         }
 
         auto timeSinceLastAccess =
-                std::chrono::duration_cast<std::chrono::seconds>(now -
-                                                                 lastAccess);
+            std::chrono::duration_cast<std::chrono::seconds>(now - lastAccess);
         if (timeSinceLastAccess >= Configuration::inactivityTimeout)
         {
             LogMsg(Logger::Info, machine.getName(),
                    " Inactivity timer expired (",
-                       Configuration::inactivityTimeout.count(),
-                       "s) - Unmounting");
+                   Configuration::inactivityTimeout.count(), "s) - Unmounting");
             // unmount media & stop retriggering timer
             boost::asio::spawn(
                 machine.getIoc(),
@@ -108,4 +106,3 @@ std::unique_ptr<BasicState> ActiveState::onEnter()
 
     return nullptr;
 }
-

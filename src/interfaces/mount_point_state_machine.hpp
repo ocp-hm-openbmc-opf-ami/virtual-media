@@ -18,18 +18,17 @@ struct MountPointStateMachine
         bool rw;
         std::unique_ptr<resource::Mount> mountPoint;
         std::unique_ptr<utils::CredentialsProvider> credentials;
-       std::unique_ptr<resource::NfsMount> mountPointNfs;
-
+        std::unique_ptr<resource::NfsMount> mountPointNfs;
     };
 
     virtual ~MountPointStateMachine() = default;
 
     virtual void notify(const std::error_code& ec = {}) = 0;
     virtual void notificationStart() = 0;
-    virtual void
-        notificationInitialize(std::shared_ptr<sdbusplus::asio::connection> con,
-                               const std::string& svc, const std::string& iface,
-                               const std::string& name) = 0;
+    virtual void notificationInitialize(
+        std::shared_ptr<sdbusplus::asio::connection> con,
+        const std::string& svc, const std::string& iface,
+        const std::string& name) = 0;
 
     virtual std::string_view getName() const = 0;
     virtual Configuration::MountPoint& getConfig() = 0;

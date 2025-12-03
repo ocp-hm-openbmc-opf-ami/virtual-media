@@ -13,8 +13,8 @@ struct ActiveState : public BasicStateT<ActiveState>
     ActiveState(interfaces::MountPointStateMachine& machine,
                 std::unique_ptr<resource::Process> process,
                 std::unique_ptr<resource::Gadget> gadget) :
-        BasicStateT(machine),
-        process(std::move(process)), gadget(std::move(gadget))
+        BasicStateT(machine), process(std::move(process)),
+        gadget(std::move(gadget))
     {
         machine.notify();
     };
@@ -37,8 +37,8 @@ struct ActiveState : public BasicStateT<ActiveState>
             }
 
             auto timeSinceLastAccess =
-                std::chrono::duration_cast<std::chrono::seconds>(now -
-                                                                 lastAccess);
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    now - lastAccess);
             if (timeSinceLastAccess >= Configuration::inactivityTimeout)
             {
                 LogMsg(Logger::Info, machine.getName(),
