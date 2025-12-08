@@ -426,6 +426,19 @@ struct InitialState : public BasicStateT<InitialState>
                         ("File must be a regular file: " + localPath).c_str());
                 }
 
+                // Detect image type (CD/HD) for LMedia redirection
+                int imgType = detectImageType(localPath);
+                if (imgType == 1 && rw)
+                {
+                    LogMsg(
+                        Logger::Error,
+                        "Attempt to mount CD image with write access is not allowed: ",
+                        localPath);
+                    throw sdbusplus::exception::SdBusError(
+                        EPERM,
+                        "CD image redirection is only allowed with read-only access");
+                }
+
                 // Find first available slot for mounting
                 for (const auto& slotName : slotOrder)
                 {
