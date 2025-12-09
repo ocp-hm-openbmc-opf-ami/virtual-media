@@ -69,7 +69,7 @@ struct MountPointStateMachine : public interfaces::MountPointStateMachine
 
     void setAdditionalInfo(const std::string& info)
     {
-        additionalInfo = std::move(info);
+        additionalInfo = info;
         LogMsg(Logger::Debug, name,
                " Updated additionalInfo : ", additionalInfo);
     }
