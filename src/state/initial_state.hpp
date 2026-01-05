@@ -179,6 +179,13 @@ struct InitialState : public BasicStateT<InitialState>
                 return std::string();
             });
         iface->register_property(
+            "UserName", std::string(),
+            [](const std::string& req, std::string& property) {
+                property = req;
+                return 1; // success
+            },
+            [](const std::string& property) { return property; });
+        iface->register_property(
             "WriteProtected", bool(true),
             []([[maybe_unused]] const bool& req,
                [[maybe_unused]] bool& property) { return 0; },
