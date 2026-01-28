@@ -1658,16 +1658,33 @@ struct UsbGadget
                                         std::stoi(portNumber) - 1;
 
                                     if (fs::is_directory(port) &&
-                                        !fs::is_symlink(port) &&
-                                        !fs::exists(port.path() /
-                                                    ("gadget." +
-                                                     std::to_string(gadgetId)) /
-                                                    "suspended"))
+                                        !fs::is_symlink(port))
                                     {
-                                        LogMsg(Logger::Debug,
-                                               "Use port : ", portId);
-                                        echoToFile(gadgetDir / "UDC", portId);
-                                        return 0;
+                                        auto suspendedPath =
+                                            port.path() /
+                                            ("gadget." +
+                                             std::to_string(gadgetId)) /
+                                            "suspended";
+
+                                        if (!fs::exists(suspendedPath))
+                                        {
+                                            if (echoToFile(gadgetDir / "UDC",
+                                                           portId))
+                                            {
+                                                LogMsg(
+                                                    Logger::Info,
+                                                    "Successfully bound to port: ",
+                                                    portId);
+                                                return 0;
+                                            }
+                                            else
+                                            {
+                                                LogMsg(
+                                                    Logger::Info, "Port ",
+                                                    portId,
+                                                    " binding failed, trying next port");
+                                            }
+                                        }
                                     }
                                 }
                             }
