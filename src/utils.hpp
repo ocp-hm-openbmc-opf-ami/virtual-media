@@ -6,7 +6,7 @@
 #include <unistd.h>
 
 #include <boost/asio/steady_timer.hpp>
-#include <boost/process/async_pipe.hpp>
+#include <boost/process/v1/async_pipe.hpp>
 #include <boost/type_traits/has_dereference.hpp>
 #include <sdbusplus/asio/object_server.hpp>
 
@@ -199,7 +199,7 @@ class NamedPipe
     }
 
     const std::string name;
-    boost::process::async_pipe impl;
+    boost::process::v1::async_pipe impl;
     Buffer buffer;
 };
 
