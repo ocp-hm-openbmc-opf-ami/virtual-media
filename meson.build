@@ -11,6 +11,14 @@ project(
     version: '0.1',
 )
 
+# Check and define macro for dual node support
+if get_option('dual_node').enabled()
+    add_project_arguments('-DMULTI_HOST_DEFAULT_MODE', language: 'cpp')
+    message('Dual Node support is enabled')
+else
+    message('Dual Node support is disabled')
+endif
+
 if get_option('cpp_std') != 'c++23'
     error('This project requires c++23 support')
 endif
@@ -191,6 +199,14 @@ configure_file(input: 'xyz.openbmc_project.VirtualMedia.service',
                copy: true,
                install: true)
 
+if get_option('dual_node').enabled()
+    configure_file(input: 'xyz.openbmc_project.VirtualMedia1.service',
+                   output: 'xyz.openbmc_project.VirtualMedia1.service',
+                   install_dir: systemd_system_unit_dir,
+                   copy: true,
+                   install: true)
+endif
+
 configure_file(input : 'tmpfiles.d/virtual-media.conf',
                output : 'virtual-media.conf',
                copy : true,
@@ -202,6 +218,14 @@ configure_file(input : 'virtual-media.json',
                copy : true,
                install_dir: '/etc/',
                install : true)
+
+if get_option('dual_node').enabled()
+    configure_file(input : 'virtual-media1.json',
+                   output : 'virtual-media1.json',
+                   copy : true,
+                   install_dir: '/etc/',
+                   install : true)
+endif
 
 srcfiles_app = [ 'src/main.cpp',
                  'src/resources.cpp',

@@ -45,7 +45,9 @@ struct InitialState : public BasicStateT<InitialState>
         addProcessInterface(event);
         addServiceInterface(event, isLegacy);
 
+#ifndef MULTI_HOST_DEFAULT_MODE
         addGlobalLocalMountService(event);
+#endif
 
         return std::make_unique<ReadyState>(machine);
     }
@@ -68,19 +70,29 @@ struct InitialState : public BasicStateT<InitialState>
         interfaces::MountPointStateMachine& machine)
     {
         LogMsg(Logger::Debug, "getObjectPath entry()");
+        std::string basePath = "/xyz/openbmc_project/VirtualMedia";
+#ifdef MULTI_HOST_DEFAULT_MODE
+        // Check if this is VirtualMedia1 service by examining NBD device
+        // numbers VirtualMedia1 uses higher NBD device numbers (nbd4-nbd7)
+        std::string nbdDevice = machine.getConfig().nbdDevice.to_string();
+        if (nbdDevice == "nbd4" || nbdDevice == "nbd5" || nbdDevice == "nbd6" ||
+            nbdDevice == "nbd7")
+        {
+            basePath = "/xyz/openbmc_project/VirtualMedia1";
+        }
+#endif
         std::string objPath;
-
         switch (machine.getConfig().mode)
         {
             case Configuration::Mode::proxy:
-                objPath = "/xyz/openbmc_project/VirtualMedia/Proxy/";
+                objPath = basePath + "/Proxy/";
                 break;
             case Configuration::Mode::local:
-                objPath = "/xyz/openbmc_project/VirtualMedia/Local/";
+                objPath = basePath + "/Local/";
                 break;
             case Configuration::Mode::legacy:
             default:
-                objPath = "/xyz/openbmc_project/VirtualMedia/Legacy/";
+                objPath = basePath + "/Legacy/";
                 break;
         }
         return objPath;
@@ -184,7 +196,14 @@ struct InitialState : public BasicStateT<InitialState>
                 property = req;
                 return 1; // success
             },
-            [](const std::string& property) { return property; });
+            [&target = machine.getTarget()](
+                [[maybe_unused]] const std::string& property) {
+                if (target && target->credentials)
+                {
+                    return target->credentials->user();
+                }
+                return std::string();
+            });
         iface->register_property(
             "WriteProtected", bool(true),
             []([[maybe_unused]] const bool& req,
@@ -362,9 +381,17 @@ struct InitialState : public BasicStateT<InitialState>
         LogMsg(Logger::Info,
                "Creating Global Local Service for dynamic allocation");
 
+        // Determine base path from global context
+        std::string basePath = "/xyz/openbmc_project/VirtualMedia";
+#ifdef MULTI_HOST_DEFAULT_MODE
+        // Use global service context to determine the correct base path
+        extern std::string g_basePath;
+        basePath = "/xyz/openbmc_project/" + g_basePath;
+#endif
+        std::string localPath = basePath + "/Local";
+
         auto localIface = event.objServer->add_interface(
-            "/xyz/openbmc_project/VirtualMedia/Local",
-            "xyz.openbmc_project.VirtualMedia.Local");
+            localPath.c_str(), "xyz.openbmc_project.VirtualMedia.Local");
 
         // **Dynamic Mount Method - finds first available slot**
         localIface->register_method(

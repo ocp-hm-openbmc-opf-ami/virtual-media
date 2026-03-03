@@ -18,8 +18,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -30,6 +32,12 @@
 #define USB_VMEDIA_NAME_SIZE 29
 static std::map<std::string, std::atomic<bool>> retryThreadCreatedMap;
 static std::atomic<bool> is_reconnecting;
+
+/* Global variables to track which service (VirtualMedia or VirtualMedia1) this
+ * process is */
+extern std::string g_serviceName;
+extern std::string g_basePath;
+
 namespace fs = std::filesystem;
 #include "credentials.hpp"
 extern std::shared_ptr<Credentials> creds[2];
@@ -575,20 +583,43 @@ static std::string mountMethod(const std::string& Slot)
 
     return " ";
 }
+
+/* @brief Helper to get mount directory prefix based on service */
+static std::string getMountDirPrefix()
+{
+    std::string prefix = "/tmp/";
+#ifdef MULTI_HOST_DEFAULT_MODE
+    extern std::string g_basePath;
+    if (g_basePath == "VirtualMedia1")
+    {
+        prefix = "/tmp/vmedia1/";
+    }
+#endif
+    return prefix;
+}
+
+/* @brief Helper to get current service name and base path from global context
+ */
+static std::tuple<std::string, std::string> getServiceAndBasePath(
+    [[maybe_unused]] const std::string& Slot = "")
+{
+    return {g_serviceName, g_basePath};
+}
+
 static void unMount(std::string Slot)
 {
-    std::string vMediaService = "xyz.openbmc_project.VirtualMedia";
+    auto [vMediaService, basePath] = getServiceAndBasePath(Slot);
     std::string obj = "/xyz/openbmc_project/";
     std::string iface = "xyz.openbmc_project.VirtualMedia.";
 
     if (Slot == "Slot_0" || Slot == "Slot_1")
     {
-        obj = obj + "VirtualMedia/Proxy/" + Slot;
+        obj = obj + basePath + "/Proxy/" + Slot;
         iface = iface + "Proxy";
     }
     else
     {
-        obj = obj + "VirtualMedia/Legacy/" + Slot;
+        obj = obj + basePath + "/Legacy/" + Slot;
         iface = iface + "Legacy";
     }
 
@@ -989,7 +1020,8 @@ static bool retryMount(const std::string& localMountPath,
                        unsigned int maxRetries, unsigned int retryDelay)
 {
     // Variables to store mount configuration
-    std::string objpath = "/xyz/openbmc_project/VirtualMedia/Legacy/";
+    auto [serviceName, basePath] = getServiceAndBasePath(localMountPath);
+    std::string objpath = "/xyz/openbmc_project/" + basePath + "/Legacy/";
     std::string interface = "xyz.openbmc_project.VirtualMedia.Legacy";
     std::string slot_name = localMountPath;
     DbusVariantType unixFd = -1;
@@ -1004,7 +1036,7 @@ static bool retryMount(const std::string& localMountPath,
     if (creds[slotNumber] != NULL)
     {
         Local_image_name =
-            "/tmp/" + localMountPath + "/" +
+            getMountDirPrefix() + localMountPath + "/" +
             creds[slotNumber]->getUrl().substr(
                 creds[slotNumber]->getUrl().find_last_of("/\\") + 1);
         objpath = objpath + localMountPath;
@@ -1141,7 +1173,7 @@ inline void handleUnmountAndRetry(const std::string& path, int slotNumber)
 inline void mountMonitorThread(std::string path)
 {
     int slotNumber = extractSlotNumber(path);
-    std::string mountPath = "/tmp/" + path;
+    std::string mountPath = getMountDirPrefix() + path;
 
     while (true)
     {
@@ -1180,12 +1212,12 @@ inline void mountMonitorThread(std::string path)
                 if (slotNumber == 0)
                 {
                     path = "Slot_3";
-                    mountPath = "/tmp/Slot_3";
+                    mountPath = getMountDirPrefix() + "Slot_3";
                     slotNumber = extractSlotNumber(path);
                 }
                 else if (slotNumber == 1)
                 {
-                    mountPath = "/tmp/Slot_2";
+                    mountPath = getMountDirPrefix() + "Slot_2";
                     path = "Slot_2";
                     slotNumber = extractSlotNumber(path);
                 }
@@ -1241,9 +1273,18 @@ struct UsbGadget
         }
     }
 
-    static constexpr const char* getGadgetDirPrefix()
+    static std::string getGadgetDirPrefix()
     {
-        return "/sys/kernel/config/usb_gadget/mass-storage-";
+        std::string prefix = "/sys/kernel/config/usb_gadget/mass-storage-";
+#ifdef MULTI_HOST_DEFAULT_MODE
+        // Make gadget names unique for each service
+        extern std::string g_basePath;
+        if (g_basePath == "VirtualMedia1")
+        {
+            prefix = "/sys/kernel/config/usb_gadget/mass-storage1-";
+        }
+#endif
+        return prefix;
     }
 
   public:
@@ -1272,22 +1313,46 @@ struct UsbGadget
         const fs::path massStorageDir = configDir / "mass_storage.usb0";
         const fs::path configStringsDir = configDir / "strings/0x409";
         std::string usbVirtualHub;
+#ifdef MULTI_HOST_DEFAULT_MODE
+        // Determine which USB hub to use based on service
+        extern std::string g_basePath;
+        bool isVirtualMedia1 = (g_basePath == "VirtualMedia1");
+
         if (fs::exists("/sys/bus/platform/devices/12011000.usb-vhub"))
         {
             usbVirtualHub = "12011000"; /* AST2700 A0 */
         }
-        else if (fs::exists("/sys/bus/platform/devices/12060000.usb-vhub"))
+        else if (fs::exists("/sys/bus/platform/devices/12060000.usb-vhub") &&
+                 fs::exists("/sys/bus/platform/devices/12062000.usb-vhub"))
         {
-            usbVirtualHub = "12060000"; /* AST2700 A1 */
+            // Two separate USB hubs available - assign one to each service
+            usbVirtualHub = isVirtualMedia1 ? "12062000" : "12060000";
         }
-        else if (fs::exists("/sys/bus/platform/devices/ci_hdrc.0"))
+        else if (isVirtualMedia1)
+        {
+            // VirtualMedia1 service uses node 1
+            usbVirtualHub = "12021000"; /* Venice platform node 1 */
+        }
+        else
+        {
+            // VirtualMedia service uses node 0
+            usbVirtualHub = "12060000"; /* Venice platform node 0 */
+        }
+#else
+        // MULTI_HOST_DEFAULT_MODE not defined - use legacy fallback
+        if (fs::exists("/sys/bus/platform/devices/ci_hdrc.0"))
         {
             usbVirtualHub = "ci_hdrc"; /* npcm845 */
+        }
+        else if (fs::exists("/sys/bus/platform/devices/12060000.usb-vhub"))
+        {
+            usbVirtualHub = "12060000"; /* Venice single node */
         }
         else
         {
             usbVirtualHub = "1e6a0000"; /* AST2600 */
         }
+#endif
 
         /* Parameters for Session management register/unregister */
 
@@ -1566,24 +1631,27 @@ struct UsbGadget
                         if (slot != -1)
                         {
                             auto bus = sdbusplus::bus::new_system();
+                            std::string slotStr =
+                                "Slot_" + std::to_string(slot);
+                            auto [serviceName,
+                                  basePath] = getServiceAndBasePath();
 
                             if ((slot == 0) || (slot == 1))
                             {
-                                objpath = objpath + "VirtualMedia/Proxy/Slot_" +
+                                objpath = objpath + basePath + "/Proxy/Slot_" +
                                           std::to_string(slot);
                                 interface = interface + "Proxy";
                             }
                             else
                             {
-                                objpath = objpath +
-                                          "VirtualMedia/Legacy/Slot_" +
+                                objpath = objpath + basePath + "/Legacy/Slot_" +
                                           std::to_string(slot);
                                 interface = interface + "Legacy";
                             }
 
                             auto methodCall = bus.new_method_call(
-                                "xyz.openbmc_project.VirtualMedia",
-                                objpath.c_str(), interface.c_str(), "Unmount");
+                                serviceName.c_str(), objpath.c_str(),
+                                interface.c_str(), "Unmount");
                             bus.call(methodCall);
                             exit(0);
                         }
@@ -1631,9 +1699,16 @@ struct UsbGadget
                     }
                     else
                     {
+#ifdef MULTI_HOST_DEFAULT_MODE
                         if (usbVirtualHub == "12011000" ||
                             usbVirtualHub == "12060000" ||
-                            usbVirtualHub == "1e6a0000")
+                            usbVirtualHub == "12062000" ||
+                            usbVirtualHub == "12021000")
+#else
+                        if (usbVirtualHub == "ci_hdrc" ||
+                            usbVirtualHub == "1e6a0000" ||
+                            usbVirtualHub == "12060000")
+#endif
                         {
                             for (const auto& port : fs::directory_iterator(
                                      "/sys/bus/platform/devices/" +

@@ -1,0 +1,48 @@
+{
+    "InactivityTimeout": 1800,
+    "MountPoints": {
+        "Slot_0": {
+            "EndpointId": "/nbd/4",
+            "Mode": 0,
+            "NBDDevice": "nbd4",
+            "UnixSocket": "/run/virtual-media/nbd4.sock",
+            "Timeout": 30,
+            "BlockSize": 512
+        },
+        "Slot_1": {
+            "EndpointId": "/nbd/5",
+            "Mode": 0,
+            "NBDDevice": "nbd5",
+            "UnixSocket": "/run/virtual-media/nbd5.sock",
+            "Timeout": 30,
+            "BlockSize": 512
+        },
+        "Slot_2": {
+            "EndpointId": "",
+            "Mode": 1,
+            "NBDDevice": "nbd6",
+            "UnixSocket": "/run/virtual-media/nbd6.sock",
+            "Timeout": 90,
+            "BlockSize": 512
+        },
+        "Slot_3": {
+            "EndpointId": "",
+            "Mode": 1,
+            "NBDDevice": "nbd7",
+            "UnixSocket": "/run/virtual-media/nbd7.sock",
+            "Timeout": 90,
+            "BlockSize": 512
+        }
+    },
+    "RetryCount": 3,
+    "RetryInterval": 15,
+    "BackupImageURL": {
+        "Slot_2": {
+            "ImageURL": ""
+        },
+        "Slot_3": {
+            "ImageURL": ""
+        }
+    }
+}
+

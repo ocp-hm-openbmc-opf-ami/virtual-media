@@ -33,9 +33,18 @@ class Directory
     explicit Directory(std::filesystem::path name) :
         path(std::filesystem::temp_directory_path() / name)
     {
+#ifdef MULTI_HOST_DEFAULT_MODE
+        // Make mount directories unique for each service
+        // Reference global namespace g_basePath
+        if (::g_basePath == "VirtualMedia1")
+        {
+            // VirtualMedia1 uses vmedia1/ prefix
+            path = std::filesystem::temp_directory_path() / "vmedia1" / name;
+        }
+#endif
         std::error_code ec;
 
-        if (!std::filesystem::create_directory(path, ec))
+        if (!std::filesystem::create_directories(path, ec))
         {
             LogMsg(Logger::Error, ec,
                    " : Unable to create mount directory: ", path);

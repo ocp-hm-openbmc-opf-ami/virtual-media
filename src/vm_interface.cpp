@@ -15,8 +15,6 @@
 
 using json = nlohmann::json;
 
-#define VIRTUAL_MEDIA_CONFIG_PATH "/etc/virtual-media.json"
-
 namespace vm
 {
 // Declare a global or class-level json object to store the JSON data
@@ -26,7 +24,7 @@ int Interface ::loadJson()
 {
     try
     {
-        std::ifstream f(VIRTUAL_MEDIA_CONFIG_PATH);
+        std::ifstream f(instance->vmConfigPath);
         if (!f.is_open())
         {
             throw std::runtime_error("Error opening JSON file");
@@ -48,9 +46,10 @@ int Interface ::loadJson()
 }
 
 // Constructor to initialize the object server and add the interface
-Interface::Interface(
-    std::shared_ptr<sdbusplus::asio::object_server> objServer) :
-    server(objServer)
+Interface::Interface(std::shared_ptr<sdbusplus::asio::object_server> objServer,
+                     const std::string& objectPath,
+                     const std::string& configPath) :
+    server(objServer), vmObjPath(objectPath), vmConfigPath(configPath)
 {
     instance = this;
 }
@@ -80,7 +79,7 @@ void Interface::saveImageURLToJson(const std::string& imageURL,
     {
         jsonData["BackupImageURL"][slotKey]["ImageURL"] = imageURL;
 
-        std::ofstream outputFile(VIRTUAL_MEDIA_CONFIG_PATH);
+        std::ofstream outputFile(instance->vmConfigPath);
         if (outputFile.is_open())
         {
             outputFile << jsonData.dump(4); // Write updated JSON to file
@@ -89,7 +88,7 @@ void Interface::saveImageURLToJson(const std::string& imageURL,
         else
         {
             LogMsg(Logger::Error, "Error in writing the the file! ",
-                   VIRTUAL_MEDIA_CONFIG_PATH);
+                   instance->vmConfigPath.c_str());
         }
         // Reload the ImageURL properties from JSON to update D-Bus interface
         instance->loadImageURLFromJson();
@@ -97,7 +96,7 @@ void Interface::saveImageURLToJson(const std::string& imageURL,
     else
     {
         LogMsg(Logger::Error, "Slot not found in JSON. Cannot save ImageURL.",
-               VIRTUAL_MEDIA_CONFIG_PATH);
+               instance->vmConfigPath.c_str());
     }
 }
 
@@ -223,7 +222,7 @@ std::string Interface::SetAll(unsigned int newRetryCount,
         {
             jsonData["RetryCount"] = RetryCount;
             jsonData["RetryInterval"] = RetryInterval;
-            std::ofstream outputFile(VIRTUAL_MEDIA_CONFIG_PATH);
+            std::ofstream outputFile(instance->vmConfigPath);
             if (outputFile.is_open())
             {
                 outputFile << jsonData.dump(4); // Write updated JSON to file
@@ -232,7 +231,7 @@ std::string Interface::SetAll(unsigned int newRetryCount,
             else
             {
                 LogMsg(Logger::Error, "Error in writing the the file! ",
-                       VIRTUAL_MEDIA_CONFIG_PATH);
+                       instance->vmConfigPath.c_str());
             }
         }
     }

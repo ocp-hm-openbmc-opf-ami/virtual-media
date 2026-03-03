@@ -29,9 +29,10 @@ Gadget::Gadget(interfaces::MountPointStateMachine& machine,
 
         if (status == -1)
         {
-            LogMsg(Logger::Error,
-                   "Image size too small, skipping gadget configuration for: ",
-                   machine.getName());
+            LogMsg(
+                Logger::Error,
+                "Failed to configure USB gadget for: ", machine.getName(),
+                " - Check system logs for details (image size, USB hub, or filesystem error)");
         }
     }
     catch (const std::exception& e)

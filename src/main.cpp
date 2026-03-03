@@ -25,6 +25,10 @@
 
 std::chrono::seconds Configuration::inactivityTimeout;
 
+// Define global service context variables (declared in system.hpp)
+std::string g_serviceName = "xyz.openbmc_project.VirtualMedia";
+std::string g_basePath = "VirtualMedia";
+
 class App
 {
   public:
@@ -42,9 +46,26 @@ class App
                 std::make_shared<sdbusplus::asio::connection>(ioc, custom_bus);
         }
         objServer = std::make_shared<sdbusplus::asio::object_server>(bus);
-        bus->request_name("xyz.openbmc_project.VirtualMedia");
+
+        // Determine D-Bus service name based on configuration file
+        std::string serviceName = "xyz.openbmc_project.VirtualMedia";
+        std::string objectPath = "/xyz/openbmc_project/VirtualMedia";
+        std::string basePath = "VirtualMedia";
+#ifdef MULTI_HOST_DEFAULT_MODE
+        if (config.configPath.find("virtual-media1") != std::string::npos)
+        {
+            serviceName = "xyz.openbmc_project.VirtualMedia1";
+            objectPath = "/xyz/openbmc_project/VirtualMedia1";
+            basePath = "VirtualMedia1";
+        }
+#endif
+        // Set global context for this service instance
+        g_serviceName = serviceName;
+        g_basePath = basePath;
+
+        bus->request_name(serviceName.c_str());
         objManager = std::make_shared<sdbusplus::server::manager::manager>(
-            *bus, "/xyz/openbmc_project/VirtualMedia");
+            *bus, objectPath.c_str());
 
         for (const auto& [name, entry] : config.mountPoints)
         {
@@ -64,7 +85,14 @@ class App
     void run()
     {
         auto sessionMatch = dbusMonitor.sessionMonitor(bus);
-        vm::Interface interface(objServer);
+        std::string baseObjectPath = "/xyz/openbmc_project/VirtualMedia";
+#ifdef MULTI_HOST_DEFAULT_MODE
+        if (config.configPath.find("virtual-media1") != std::string::npos)
+        {
+            baseObjectPath = "/xyz/openbmc_project/VirtualMedia1";
+        }
+#endif
+        vm::Interface interface(objServer, baseObjectPath, config.configPath);
         interface.addInterfaces();
         ioc.run();
     }
@@ -82,11 +110,27 @@ class App
     DbusMonitor dbusMonitor;
 };
 
-int main()
+int main(int argc, char* argv[])
 {
-    Configuration config("/etc/virtual-media.json");
+    std::string configPath;
+
+    // Parse command-line arguments for --config
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string arg = argv[i];
+        if (arg == "--config" && i + 1 < argc)
+        {
+            configPath = argv[++i];
+        }
+    }
+
+    Configuration config(configPath);
+
     if (!config.valid)
+    {
+        LogMsg(Logger::Error, "Configuration file is invalid: ", configPath);
         return -1;
+    }
 
     // setup secure ownership for newly created files (always succeeds)
     umask(Configuration::defaultUmask);

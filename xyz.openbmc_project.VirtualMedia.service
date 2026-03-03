@@ -3,7 +3,7 @@ Description=Virtual Media Service
 After=dbus.service
 
 [Service]
-ExecStart=/usr/libexec/virtual-media
+ExecStart=/usr/libexec/virtual-media --config /etc/virtual-media.json
 Restart=always
 Type=simple
 
