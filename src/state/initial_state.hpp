@@ -488,6 +488,10 @@ struct InitialState : public BasicStateT<InitialState>
                                    "Dynamically assigned slot: ", slotName,
                                    " for local file: ", localPath);
 
+                            // clears any stale additional info from previous
+                            // sessions and set to LMEDIA for local mounts
+                            machine->setAdditionalInfo("LMEDIA");
+
                             // Create target for local mount
                             interfaces::MountPointStateMachine::Target target;
                             target.imgUrl = localPath;
