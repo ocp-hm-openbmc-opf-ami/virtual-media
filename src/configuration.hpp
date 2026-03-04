@@ -76,10 +76,11 @@ class Configuration
     }
 
     bool valid = false;
+    std::string configPath;
     boost::container::flat_map<std::string, MountPoint> mountPoints;
     static std::chrono::seconds inactivityTimeout;
 
-    Configuration(const std::string& file)
+    Configuration(const std::string& file) : configPath(file)
     {
         valid = loadConfiguration(file);
     }

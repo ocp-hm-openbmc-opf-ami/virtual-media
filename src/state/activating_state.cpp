@@ -49,11 +49,11 @@ std::unique_ptr<BasicState> ActivatingState::handleEvent(
         if (gadget->getStatus() == -1)
         {
             LogMsg(Logger::Error,
-                   "Skipping redirection: image size too small for ",
+                   "Skipping redirection: USB gadget configuration failed for ",
                    machine.getName());
             return std::make_unique<ReadyState>(
                 machine, std::errc::invalid_argument,
-                "Image size too small, skipping redirection");
+                "USB gadget configuration failed");
         }
         return std::make_unique<ActiveState>(machine, std::move(process),
                                              std::move(gadget));
@@ -79,10 +79,12 @@ std::unique_ptr<BasicState> ActivatingState::activateProxyMode()
                " [Local] Mount requested on address: ",
                machine.getTarget()->imgUrl, " ; RW: ", machine.getTarget()->rw);
 
+#ifndef MULTI_HOST_DEFAULT_MODE
         if (isLocalFile(machine.getTarget()->imgUrl))
         {
             return mountLocalFile();
         }
+#endif
     }
 
     process = std::make_unique<resource::Process>(
@@ -157,10 +159,12 @@ std::unique_ptr<BasicState> ActivatingState::activateLegacyMode()
             "Unable to process further because slotNumber is Inavlid");
     }
 
+#ifndef MULTI_HOST_DEFAULT_MODE
     if (isLocalFile(machine.getTarget()->imgUrl))
     {
         return mountLocalFile();
     }
+#endif
 
     if (isCifsUrl(machine.getTarget()->imgUrl))
     {

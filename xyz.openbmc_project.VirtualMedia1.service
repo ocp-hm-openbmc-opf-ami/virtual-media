@@ -1,0 +1,12 @@
+[Unit]
+Description=Virtual Media Service for Node 1
+After=xyz.openbmc_project.VirtualMedia.service
+
+[Service]
+ExecStart=/usr/libexec/virtual-media --config /etc/virtual-media1.json
+Restart=always
+Type=simple
+BusName=xyz.openbmc_project.VirtualMedia1
+
+[Install]
+WantedBy=multi-user.target

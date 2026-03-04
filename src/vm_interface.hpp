@@ -9,7 +9,6 @@
 
 namespace vm
 {
-const std::string vmObjPath = "/xyz/openbmc_project/VirtualMedia";
 const std::string RmediaInterface =
     "xyz.openbmc_project.VirtualMedia.Reconnect";
 const std::string RmediaImageURLInterface =
@@ -21,7 +20,8 @@ class Interface
 {
   public:
     // Constructor to initialize the object server and add the interface
-    Interface(std::shared_ptr<sdbusplus::asio::object_server> objServer);
+    Interface(std::shared_ptr<sdbusplus::asio::object_server> objServer,
+              const std::string& objectPath, const std::string& configPath);
 
     // Method to load JSON configuration
     static int loadJson(); // Add this line to declare the loadJson method
@@ -50,6 +50,8 @@ class Interface
         vmediaInterface; // D-Bus interface object
     std::shared_ptr<sdbusplus::asio::dbus_interface> vmediaImageURLInterface;
 
+    std::string vmObjPath;          // Dynamic object path
+    std::string vmConfigPath;       // Dynamic config path
     unsigned int RetryCount = 0;    // Initial default value for retry count
     unsigned int RetryInterval = 0; // Initial default value for retry interval
 };
