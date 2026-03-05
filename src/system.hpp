@@ -1303,6 +1303,7 @@ struct UsbGadget
                ", path=", path, ", State=", static_cast<uint32_t>(change), ")");
         bool success = true;
         char usbVmediaName[USB_VMEDIA_NAME_SIZE];
+        const bool isLmedia = (additionalInfo == "LMEDIA");
         std::error_code ec;
 
         const fs::path gadgetDir = getGadgetDirPrefix() + name;
@@ -1444,96 +1445,104 @@ struct UsbGadget
 
                 propertyVariant propertyVar;
                 auto bus = sdbusplus::bus::new_system();
-
-                try
+                if (isLmedia)
                 {
-                    webSessionId = extractSessionId(additionalInfo);
-                    bool found = false;
-                    LogMsg(Logger::Info, "[Session]: (", name, ") ",
-                           " Extracted web session ID: ",
-                           static_cast<int>(webSessionId));
-                    auto msgFetch = bus.new_method_call(
-                        sessMgrService.c_str(), sessMgrObjPath.c_str(),
-                        DBUS_PROPERTIES_INTERFACE, "Get");
-
-                    msgFetch.append(sessMgrWebIface.c_str(), "WebSessionInfo");
-
-                    auto reply0 = bus.call(msgFetch);
-                    reply0.read(propertyVar);
-
-                    if (std::holds_alternative<sessionList>(propertyVar))
+                    webSessionId = DEFAULT_SID;
+                }
+                else
+                {
+                    try
                     {
-                        sessionList& webSesionList =
-                            std::get<sessionList>(propertyVar);
+                        webSessionId = extractSessionId(additionalInfo);
+                        bool found = false;
+                        LogMsg(Logger::Info, "[Session]: (", name, ") ",
+                               " Extracted web session ID: ",
+                               static_cast<int>(webSessionId));
+                        auto msgFetch = bus.new_method_call(
+                            sessMgrService.c_str(), sessMgrObjPath.c_str(),
+                            DBUS_PROPERTIES_INTERFACE, "Get");
 
-                        if (!webSesionList.empty())
+                        msgFetch.append(sessMgrWebIface.c_str(),
+                                        "WebSessionInfo");
+
+                        auto reply0 = bus.call(msgFetch);
+                        reply0.read(propertyVar);
+
+                        if (std::holds_alternative<sessionList>(propertyVar))
                         {
-                            for (const auto& webSession : webSesionList)
-                            {
-                                if (webSessionId ==
-                                    (static_cast<uint8_t>(
-                                        std::get<0>(webSession))))
-                                {
-                                    LogMsg(
-                                        Logger::Debug, "[Session]: (", name,
-                                        ") ",
-                                        "Retrieved Web Session Details : ",
-                                        " web SessionID : ",
-                                        static_cast<int>(
-                                            std::get<0>(webSession)),
-                                        " Client IP : ",
-                                        std::get<1>(webSession),
-                                        " userName: ", std::get<2>(webSession),
-                                        " sessionType : ",
-                                        static_cast<int>(
-                                            std::get<3>(webSession)),
-                                        " previlage: ",
-                                        static_cast<int>(
-                                            std::get<4>(webSession)),
-                                        " userId: ",
-                                        static_cast<int>(
-                                            std::get<5>(webSession)),
-                                        " mountingMethod: ",
-                                        std::get<6>(webSession));
+                            sessionList& webSesionList =
+                                std::get<sessionList>(propertyVar);
 
-                                    sessionId = DEFAULT_SID;
-                                    ipAddr = std::get<1>(webSession);
-                                    userName = std::get<2>(webSession);
-                                    ;
-                                    sessionType = VMEDIA;
-                                    previlage = static_cast<uint8_t>(
-                                        std::get<4>(webSession));
-                                    userId = static_cast<uint8_t>(
-                                        std::get<5>(webSession));
-                                    mountingMethod = mountMethod(name);
-                                    found = true;
-                                    break;
+                            if (!webSesionList.empty())
+                            {
+                                for (const auto& webSession : webSesionList)
+                                {
+                                    if (webSessionId ==
+                                        (static_cast<uint8_t>(
+                                            std::get<0>(webSession))))
+                                    {
+                                        LogMsg(
+                                            Logger::Debug, "[Session]: (", name,
+                                            ") ",
+                                            "Retrieved Web Session Details : ",
+                                            " web SessionID : ",
+                                            static_cast<int>(
+                                                std::get<0>(webSession)),
+                                            " Client IP : ",
+                                            std::get<1>(webSession),
+                                            " userName: ",
+                                            std::get<2>(webSession),
+                                            " sessionType : ",
+                                            static_cast<int>(
+                                                std::get<3>(webSession)),
+                                            " previlage: ",
+                                            static_cast<int>(
+                                                std::get<4>(webSession)),
+                                            " userId: ",
+                                            static_cast<int>(
+                                                std::get<5>(webSession)),
+                                            " mountingMethod: ",
+                                            std::get<6>(webSession));
+
+                                        sessionId = DEFAULT_SID;
+                                        ipAddr = std::get<1>(webSession);
+                                        userName = std::get<2>(webSession);
+                                        ;
+                                        sessionType = VMEDIA;
+                                        previlage = static_cast<uint8_t>(
+                                            std::get<4>(webSession));
+                                        userId = static_cast<uint8_t>(
+                                            std::get<5>(webSession));
+                                        mountingMethod = mountMethod(name);
+                                        found = true;
+                                        break;
+                                    }
                                 }
                             }
                         }
+                        if (!found)
+                        {
+                            LogMsg(Logger::Info, "[Session]: (", name, ") ",
+                                   " Web Session ID: ",
+                                   static_cast<int>(webSessionId),
+                                   " not found in active session list");
+                            webSessionId = DEFAULT_SID; // Default value
+                        }
                     }
-                    if (!found)
+                    catch (const sdbusplus::exception::SdBusError& e)
                     {
-                        LogMsg(Logger::Info, "[Session]: (", name, ") ",
-                               " Web Session ID: ",
-                               static_cast<int>(webSessionId),
-                               " not found in active session list");
+                        LogMsg(Logger::Error, "[Session]: (", name, ") ",
+                               "Failed in d-bus call: ", e.what());
                         webSessionId = DEFAULT_SID; // Default value
                     }
-                }
-                catch (const sdbusplus::exception::SdBusError& e)
-                {
-                    LogMsg(Logger::Error, "[Session]: (", name, ") ",
-                           "Failed in d-bus call: ", e.what());
-                    webSessionId = DEFAULT_SID; // Default value
-                }
-                catch (const std::exception& e)
-                {
-                    LogMsg(Logger::Info, "[Session]: (", name, ") ",
-                           " Failed to retrive info from web session :",
-                           static_cast<int>(webSessionId),
-                           " EXCEPTION : ", e.what());
-                    webSessionId = DEFAULT_SID; // Default value
+                    catch (const std::exception& e)
+                    {
+                        LogMsg(Logger::Info, "[Session]: (", name, ") ",
+                               " Failed to retrive info from web session :",
+                               static_cast<int>(webSessionId),
+                               " EXCEPTION : ", e.what());
+                        webSessionId = DEFAULT_SID; // Default value
+                    }
                 }
 
                 if (webSessionId == DEFAULT_SID)
@@ -1546,7 +1555,7 @@ struct UsbGadget
                     sessionType = VMEDIA;
                     previlage = PRIV_LEVEL_ADMIN;
                     userId = DEFAULT_USER_ID;
-                    mountingMethod = mountMethod(name);
+                    mountingMethod = isLmedia ? "lmedia" : mountMethod(name);
                 }
 
                 auto msgReg = bus.new_method_call(
