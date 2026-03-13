@@ -1463,7 +1463,7 @@ struct UsbGadget
                                " Extracted web session ID: ",
                                static_cast<int>(webSessionId));
                         auto msgFetch = bus.new_method_call(
-                            sessMgrService.c_str(), sessMgrObjPath.c_str(),
+                            sessMgrService.c_str(), sessMgrWEBObjPath.c_str(),
                             DBUS_PROPERTIES_INTERFACE, "Get");
 
                         msgFetch.append(sessMgrWebIface.c_str(),
