@@ -1451,29 +1451,11 @@ struct UsbGadget
                 auto bus = sdbusplus::bus::new_system();
                 if (isLmedia)
                 {
-<<<<<<< HEAD
                     webSessionId = DEFAULT_SID;
                 }
                 else
                 {
                     try
-=======
-                    webSessionId = extractSessionId(additionalInfo);
-                    bool found = false;
-                    LogMsg(Logger::Info, "[Session]: (", name, ") ",
-                           " Extracted web session ID: ",
-                           static_cast<int>(webSessionId));
-                    auto msgFetch = bus.new_method_call(
-                        sessMgrService.c_str(), sessMgrWEBObjPath.c_str(),
-                        DBUS_PROPERTIES_INTERFACE, "Get");
-
-                    msgFetch.append(sessMgrWebIface.c_str(), "WebSessionInfo");
-
-                    auto reply0 = bus.call(msgFetch);
-                    reply0.read(propertyVar);
-
-                    if (std::holds_alternative<sessionList>(propertyVar))
->>>>>>> 3f3a396 (Enhanced VMedia session management)
                     {
                         webSessionId = extractSessionId(additionalInfo);
                         bool found = false;
