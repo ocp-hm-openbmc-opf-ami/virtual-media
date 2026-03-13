@@ -555,11 +555,13 @@ class Process : public std::enable_shared_from_this<Process>
 #define DBUS_PROPERTIES_INTERFACE "org.freedesktop.DBus.Properties"
 
 const std::string sessMgrService = "xyz.openbmc_project.SessionManager";
-const std::string sessMgrVmediaObjPath = "/xyz/openbmc_project/SessionManager/vmedia";
+const std::string sessMgrVmediaObjPath =
+    "/xyz/openbmc_project/SessionManager/vmedia";
 const std::string sessMgrWEBObjPath = "/xyz/openbmc_project/SessionManager/web";
 const std::string sessMgrVmediaIface =
     "xyz.openbmc_project.SessionManager.VmediaSessionInfo";
-const std::string sessMgrWebIface = "xyz.openbmc_project.SessionManager.WebSessionInfo";
+const std::string sessMgrWebIface =
+    "xyz.openbmc_project.SessionManager.WebSessionInfo";
 
 /* Event Logging */
 const std::string eventLogService = "xyz.openbmc_project.Logging";
@@ -796,8 +798,9 @@ class DbusMonitor
 
         sdbusplus::bus::match_t sessionMatcher(
             static_cast<sdbusplus::bus::bus&>(*conn),
-            "type='signal',member='PropertiesChanged',path='" + sessMgrVmediaObjPath +
-                "',arg0namespace='" + sessMgrVmediaIface + "'",
+            "type='signal',member='PropertiesChanged',path='" +
+                sessMgrVmediaObjPath + "',arg0namespace='" +
+                sessMgrVmediaIface + "'",
             std::move(sessionCallback));
 
         return sessionMatcher;
