@@ -1323,11 +1323,7 @@ struct UsbGadget
         extern std::string g_basePath;
         bool isVirtualMedia1 = (g_basePath == "VirtualMedia1");
 
-        if (fs::exists("/sys/bus/platform/devices/12011000.usb-vhub"))
-        {
-            usbVirtualHub = "12011000"; /* AST2700 A0 */
-        }
-        else if (fs::exists("/sys/bus/platform/devices/12060000.usb-vhub") &&
+        if (fs::exists("/sys/bus/platform/devices/12060000.usb-vhub") &&
                  fs::exists("/sys/bus/platform/devices/12062000.usb-vhub"))
         {
             // Two separate USB hubs available - assign one to each service
@@ -1352,6 +1348,10 @@ struct UsbGadget
         else if (fs::exists("/sys/bus/platform/devices/12060000.usb-vhub"))
         {
             usbVirtualHub = "12060000"; /* Venice single node */
+        }
+        else if (fs::exists("/sys/bus/platform/devices/12011000.usb-vhub"))
+        {
+            usbVirtualHub = "12011000"; /* AST2700EVB DCSCM Avencity */
         }
         else
         {
@@ -1713,13 +1713,13 @@ struct UsbGadget
                     else
                     {
 #ifdef MULTI_HOST_DEFAULT_MODE
-                        if (usbVirtualHub == "12011000" ||
-                            usbVirtualHub == "12060000" ||
+                        if (usbVirtualHub == "12060000" ||
                             usbVirtualHub == "12062000" ||
                             usbVirtualHub == "12021000")
 #else
                         if (usbVirtualHub == "ci_hdrc" ||
                             usbVirtualHub == "1e6a0000" ||
+                            usbVirtualHub == "12011000" ||
                             usbVirtualHub == "12060000")
 #endif
                         {
