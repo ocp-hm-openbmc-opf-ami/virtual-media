@@ -10,7 +10,11 @@
 #include <boost/asio.hpp>
 #include <boost/asio/spawn.hpp>
 #include <boost/container/flat_map.hpp>
-#include <boost/process.hpp>
+#include <boost/process/v1/args.hpp>
+#include <boost/process/v1/async.hpp>
+#include <boost/process/v1/async_pipe.hpp>
+#include <boost/process/v1/child.hpp>
+#include <boost/process/v1/io.hpp>
 #include <sdbusplus/asio/object_server.hpp>
 #include <sdbusplus/bus.hpp>
 #include <sdbusplus/bus/match.hpp>
@@ -375,7 +379,7 @@ class DeviceMonitor
                     }
                 }
             },
-            {});
+            boost::asio::detached);
     }
 
     void addDevice(const NBDDevice& device)
@@ -418,10 +422,10 @@ class Process : public std::enable_shared_from_this<Process>
     {
         std::error_code ec;
         LogMsg(Logger::Debug, "[Process]: Spawning ", app, " (", args, ")");
-        child = boost::process::child(
-            app, boost::process::args(args),
-            (boost::process::std_out & boost::process::std_err) > pipe, ec,
-            ioc);
+        child = boost::process::v1::child(
+            app, boost::process::v1::args(args),
+            (boost::process::v1::std_out & boost::process::v1::std_err) > pipe,
+            ec, ioc);
 
         if (ec)
         {
@@ -489,7 +493,7 @@ class Process : public std::enable_shared_from_this<Process>
 
                 onExit(child.exit_code());
             },
-            {});
+            boost::asio::detached);
         return true;
     }
 
@@ -523,7 +527,7 @@ class Process : public std::enable_shared_from_this<Process>
                     onTerminate();
                 }
             },
-            {});
+            boost::asio::detached);
     }
 
     std::string application()
@@ -533,8 +537,8 @@ class Process : public std::enable_shared_from_this<Process>
 
   private:
     boost::asio::io_context& ioc;
-    boost::process::child child;
-    boost::process::async_pipe pipe;
+    boost::process::v1::child child;
+    boost::process::v1::async_pipe pipe;
     std::string name;
     std::string app;
     const NBDDevice& dev;
@@ -1319,11 +1323,7 @@ struct UsbGadget
         extern std::string g_basePath;
         bool isVirtualMedia1 = (g_basePath == "VirtualMedia1");
 
-        if (fs::exists("/sys/bus/platform/devices/12011000.usb-vhub"))
-        {
-            usbVirtualHub = "12011000"; /* AST2700 A0 */
-        }
-        else if (fs::exists("/sys/bus/platform/devices/12060000.usb-vhub") &&
+        if (fs::exists("/sys/bus/platform/devices/12060000.usb-vhub") &&
                  fs::exists("/sys/bus/platform/devices/12062000.usb-vhub"))
         {
             // Two separate USB hubs available - assign one to each service
@@ -1348,6 +1348,10 @@ struct UsbGadget
         else if (fs::exists("/sys/bus/platform/devices/12060000.usb-vhub"))
         {
             usbVirtualHub = "12060000"; /* Venice single node */
+        }
+        else if (fs::exists("/sys/bus/platform/devices/12011000.usb-vhub"))
+        {
+            usbVirtualHub = "12011000"; /* AST2700EVB DCSCM Avencity */
         }
         else
         {
@@ -1709,13 +1713,13 @@ struct UsbGadget
                     else
                     {
 #ifdef MULTI_HOST_DEFAULT_MODE
-                        if (usbVirtualHub == "12011000" ||
-                            usbVirtualHub == "12060000" ||
+                        if (usbVirtualHub == "12060000" ||
                             usbVirtualHub == "12062000" ||
                             usbVirtualHub == "12021000")
 #else
                         if (usbVirtualHub == "ci_hdrc" ||
                             usbVirtualHub == "1e6a0000" ||
+                            usbVirtualHub == "12011000" ||
                             usbVirtualHub == "12060000")
 #endif
                         {
