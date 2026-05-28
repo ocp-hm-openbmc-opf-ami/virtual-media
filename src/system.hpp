@@ -570,10 +570,20 @@ const std::string eventLogIface = "xyz.openbmc_project.Logging.Create";
 const std::string eventlogServerity =
     "xyz.openbmc_project.Logging.Entry.Level.Informational";
 
-using sessionInfo = std::tuple<uint8_t, std::string, std::string, uint8_t,
-                               uint8_t, uint8_t, std::string, std::string>;
-using sessionList = std::vector<sessionInfo>;
-using propertyVariant = std::variant<sessionList>;
+/* VmediaSessionInfo: SessionId, IpAdress, UserName, SessionType, Previlage,
+ * UserId, MountType, SlotId */
+using vmediaSessionInfo =
+    std::tuple<uint8_t, std::string, std::string, uint8_t, uint8_t, uint8_t,
+               std::string, std::string>;
+using vmediaSessionList = std::vector<vmediaSessionInfo>;
+using vmediaPropertyVariant = std::variant<vmediaSessionList>;
+
+/* WebSessionInfo: SessionId, IpAdress, UserName, SessionType, Previlage, UserId
+ */
+using webSessionInfo =
+    std::tuple<uint8_t, std::string, std::string, uint8_t, uint8_t, uint8_t>;
+using webSessionList = std::vector<webSessionInfo>;
+using webPropertyVariant = std::variant<webSessionList>;
 
 /* @brief Method to determine mount method type[console/remote] */
 static std::string mountMethod(const std::string& Slot)
@@ -715,7 +725,7 @@ class DbusMonitor
         return removedSessionIDs;
     }
 
-    void handleSessions(const sessionList& list)
+    void handleSessions(const vmediaSessionList& list)
     {
         std::vector<uint8_t> updatedSessionIDs;
         std::vector<uint8_t> activeSessionIDs;
@@ -765,10 +775,10 @@ class DbusMonitor
         auto sessionCallback = [&conn, this](sdbusplus::message_t& msg) {
             try
             {
-                sessionList updatedlist;
+                vmediaSessionList updatedlist;
                 std::string interfaceName;
 
-                boost::container::flat_map<std::string, propertyVariant>
+                boost::container::flat_map<std::string, vmediaPropertyVariant>
                     sessionProperty;
                 msg.read(interfaceName, sessionProperty);
 
@@ -782,7 +792,8 @@ class DbusMonitor
 
                         if (entry.first == "VmediaSessionInfo")
                         {
-                            updatedlist = std::get<sessionList>(entry.second);
+                            updatedlist =
+                                std::get<vmediaSessionList>(entry.second);
                             handleSessions(updatedlist);
                         }
                     }
@@ -1327,7 +1338,7 @@ struct UsbGadget
         bool isVirtualMedia1 = (g_basePath == "VirtualMedia1");
 
         if (fs::exists("/sys/bus/platform/devices/12060000.usb-vhub") &&
-                 fs::exists("/sys/bus/platform/devices/12062000.usb-vhub"))
+            fs::exists("/sys/bus/platform/devices/12062000.usb-vhub"))
         {
             // Two separate USB hubs available - assign one to each service
             usbVirtualHub = isVirtualMedia1 ? "12062000" : "12060000";
@@ -1450,7 +1461,8 @@ struct UsbGadget
                        "Received additional info[From client] :",
                        additionalInfo);
 
-                propertyVariant propertyVar;
+                webPropertyVariant webPropertyVar;
+                vmediaPropertyVariant vmediaPropertyVar;
                 auto bus = sdbusplus::bus::new_system();
                 if (isLmedia)
                 {
@@ -1473,16 +1485,17 @@ struct UsbGadget
                                         "WebSessionInfo");
 
                         auto reply0 = bus.call(msgFetch);
-                        reply0.read(propertyVar);
+                        reply0.read(webPropertyVar);
 
-                        if (std::holds_alternative<sessionList>(propertyVar))
+                        if (std::holds_alternative<webSessionList>(
+                                webPropertyVar))
                         {
-                            sessionList& webSesionList =
-                                std::get<sessionList>(propertyVar);
+                            webSessionList& webSessions =
+                                std::get<webSessionList>(webPropertyVar);
 
-                            if (!webSesionList.empty())
+                            if (!webSessions.empty())
                             {
-                                for (const auto& webSession : webSesionList)
+                                for (const auto& webSession : webSessions)
                                 {
                                     if (webSessionId ==
                                         (static_cast<uint8_t>(
@@ -1507,14 +1520,11 @@ struct UsbGadget
                                                 std::get<4>(webSession)),
                                             " userId: ",
                                             static_cast<int>(
-                                                std::get<5>(webSession)),
-                                            " mountingMethod: ",
-                                            std::get<6>(webSession));
+                                                std::get<5>(webSession)));
 
                                         sessionId = DEFAULT_SID;
                                         ipAddr = std::get<1>(webSession);
                                         userName = std::get<2>(webSession);
-                                        ;
                                         sessionType = VMEDIA;
                                         previlage = static_cast<uint8_t>(
                                             std::get<4>(webSession));
@@ -1585,12 +1595,13 @@ struct UsbGadget
                                   "VmediaSessionInfo");
 
                     auto reply1 = bus.call(msgGet);
-                    reply1.read(propertyVar);
+                    reply1.read(vmediaPropertyVar);
 
-                    if (std::holds_alternative<sessionList>(propertyVar))
+                    if (std::holds_alternative<vmediaSessionList>(
+                            vmediaPropertyVar))
                     {
-                        sessionList& sesList =
-                            std::get<sessionList>(propertyVar);
+                        vmediaSessionList& sesList =
+                            std::get<vmediaSessionList>(vmediaPropertyVar);
 
                         if (!sesList.empty())
                         {
