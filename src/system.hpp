@@ -10,7 +10,11 @@
 #include <boost/asio.hpp>
 #include <boost/asio/spawn.hpp>
 #include <boost/container/flat_map.hpp>
-#include <boost/process.hpp>
+#include <boost/process/v1/args.hpp>
+#include <boost/process/v1/async.hpp>
+#include <boost/process/v1/async_pipe.hpp>
+#include <boost/process/v1/child.hpp>
+#include <boost/process/v1/io.hpp>
 #include <sdbusplus/asio/object_server.hpp>
 #include <sdbusplus/bus.hpp>
 #include <sdbusplus/bus/match.hpp>
@@ -375,7 +379,7 @@ class DeviceMonitor
                     }
                 }
             },
-            {});
+            boost::asio::detached);
     }
 
     void addDevice(const NBDDevice& device)
@@ -418,10 +422,10 @@ class Process : public std::enable_shared_from_this<Process>
     {
         std::error_code ec;
         LogMsg(Logger::Debug, "[Process]: Spawning ", app, " (", args, ")");
-        child = boost::process::child(
-            app, boost::process::args(args),
-            (boost::process::std_out & boost::process::std_err) > pipe, ec,
-            ioc);
+        child = boost::process::v1::child(
+            app, boost::process::v1::args(args),
+            (boost::process::v1::std_out & boost::process::v1::std_err) > pipe,
+            ec, ioc);
 
         if (ec)
         {
@@ -489,7 +493,7 @@ class Process : public std::enable_shared_from_this<Process>
 
                 onExit(child.exit_code());
             },
-            {});
+            boost::asio::detached);
         return true;
     }
 
@@ -523,7 +527,7 @@ class Process : public std::enable_shared_from_this<Process>
                     onTerminate();
                 }
             },
-            {});
+            boost::asio::detached);
     }
 
     std::string application()
@@ -533,8 +537,8 @@ class Process : public std::enable_shared_from_this<Process>
 
   private:
     boost::asio::io_context& ioc;
-    boost::process::child child;
-    boost::process::async_pipe pipe;
+    boost::process::v1::child child;
+    boost::process::v1::async_pipe pipe;
     std::string name;
     std::string app;
     const NBDDevice& dev;
@@ -551,11 +555,13 @@ class Process : public std::enable_shared_from_this<Process>
 #define DBUS_PROPERTIES_INTERFACE "org.freedesktop.DBus.Properties"
 
 const std::string sessMgrService = "xyz.openbmc_project.SessionManager";
-const std::string sessMgrObjPath = "/xyz/openbmc_project/SessionManager";
-const std::string sessMgrIface = "xyz.openbmc_project.SessionManager";
+const std::string sessMgrVmediaObjPath =
+    "/xyz/openbmc_project/SessionManager/vmedia";
+const std::string sessMgrWEBObjPath = "/xyz/openbmc_project/SessionManager/web";
 const std::string sessMgrVmediaIface =
-    "xyz.openbmc_project.SessionManager.Vmedia";
-const std::string sessMgrWebIface = "xyz.openbmc_project.SessionManager.Web";
+    "xyz.openbmc_project.SessionManager.VmediaSessionInfo";
+const std::string sessMgrWebIface =
+    "xyz.openbmc_project.SessionManager.WebSessionInfo";
 
 /* Event Logging */
 const std::string eventLogService = "xyz.openbmc_project.Logging";
@@ -564,10 +570,20 @@ const std::string eventLogIface = "xyz.openbmc_project.Logging.Create";
 const std::string eventlogServerity =
     "xyz.openbmc_project.Logging.Entry.Level.Informational";
 
-using sessionInfo = std::tuple<uint8_t, std::string, std::string, uint8_t,
-                               uint8_t, uint8_t, std::string>;
-using sessionList = std::vector<sessionInfo>;
-using propertyVariant = std::variant<sessionList>;
+/* VmediaSessionInfo: SessionId, IpAdress, UserName, SessionType, Previlage,
+ * UserId, MountType, SlotId */
+using vmediaSessionInfo =
+    std::tuple<uint8_t, std::string, std::string, uint8_t, uint8_t, uint8_t,
+               std::string, std::string>;
+using vmediaSessionList = std::vector<vmediaSessionInfo>;
+using vmediaPropertyVariant = std::variant<vmediaSessionList>;
+
+/* WebSessionInfo: SessionId, IpAdress, UserName, SessionType, Previlage, UserId
+ */
+using webSessionInfo =
+    std::tuple<uint8_t, std::string, std::string, uint8_t, uint8_t, uint8_t>;
+using webSessionList = std::vector<webSessionInfo>;
+using webPropertyVariant = std::variant<webSessionList>;
 
 /* @brief Method to determine mount method type[console/remote] */
 static std::string mountMethod(const std::string& Slot)
@@ -709,7 +725,7 @@ class DbusMonitor
         return removedSessionIDs;
     }
 
-    void handleSessions(const sessionList& list)
+    void handleSessions(const vmediaSessionList& list)
     {
         std::vector<uint8_t> updatedSessionIDs;
         std::vector<uint8_t> activeSessionIDs;
@@ -759,10 +775,10 @@ class DbusMonitor
         auto sessionCallback = [&conn, this](sdbusplus::message_t& msg) {
             try
             {
-                sessionList updatedlist;
+                vmediaSessionList updatedlist;
                 std::string interfaceName;
 
-                boost::container::flat_map<std::string, propertyVariant>
+                boost::container::flat_map<std::string, vmediaPropertyVariant>
                     sessionProperty;
                 msg.read(interfaceName, sessionProperty);
 
@@ -776,7 +792,8 @@ class DbusMonitor
 
                         if (entry.first == "VmediaSessionInfo")
                         {
-                            updatedlist = std::get<sessionList>(entry.second);
+                            updatedlist =
+                                std::get<vmediaSessionList>(entry.second);
                             handleSessions(updatedlist);
                         }
                     }
@@ -792,8 +809,9 @@ class DbusMonitor
 
         sdbusplus::bus::match_t sessionMatcher(
             static_cast<sdbusplus::bus::bus&>(*conn),
-            "type='signal',member='PropertiesChanged',path='" + sessMgrObjPath +
-                "',arg0namespace='" + sessMgrVmediaIface + "'",
+            "type='signal',member='PropertiesChanged',path='" +
+                sessMgrVmediaObjPath + "',arg0namespace='" +
+                sessMgrVmediaIface + "'",
             std::move(sessionCallback));
 
         return sessionMatcher;
@@ -1319,12 +1337,8 @@ struct UsbGadget
         extern std::string g_basePath;
         bool isVirtualMedia1 = (g_basePath == "VirtualMedia1");
 
-        if (fs::exists("/sys/bus/platform/devices/12011000.usb-vhub"))
-        {
-            usbVirtualHub = "12011000"; /* AST2700 A0 */
-        }
-        else if (fs::exists("/sys/bus/platform/devices/12060000.usb-vhub") &&
-                 fs::exists("/sys/bus/platform/devices/12062000.usb-vhub"))
+        if (fs::exists("/sys/bus/platform/devices/12060000.usb-vhub") &&
+            fs::exists("/sys/bus/platform/devices/12062000.usb-vhub"))
         {
             // Two separate USB hubs available - assign one to each service
             usbVirtualHub = isVirtualMedia1 ? "12062000" : "12060000";
@@ -1349,6 +1363,10 @@ struct UsbGadget
         {
             usbVirtualHub = "12060000"; /* Venice single node */
         }
+        else if (fs::exists("/sys/bus/platform/devices/12011000.usb-vhub"))
+        {
+            usbVirtualHub = "12011000"; /* AST2700EVB DCSCM Avencity */
+        }
         else
         {
             usbVirtualHub = "1e6a0000"; /* AST2600 */
@@ -1364,7 +1382,7 @@ struct UsbGadget
         uint8_t previlage;
         uint8_t userId;
         bool status = false;
-        int reason;
+        uint8_t reason;
         std::string mountingMethod, mountpath;
         uint8_t webSessionId;
 
@@ -1443,7 +1461,8 @@ struct UsbGadget
                        "Received additional info[From client] :",
                        additionalInfo);
 
-                propertyVariant propertyVar;
+                webPropertyVariant webPropertyVar;
+                vmediaPropertyVariant vmediaPropertyVar;
                 auto bus = sdbusplus::bus::new_system();
                 if (isLmedia)
                 {
@@ -1459,23 +1478,24 @@ struct UsbGadget
                                " Extracted web session ID: ",
                                static_cast<int>(webSessionId));
                         auto msgFetch = bus.new_method_call(
-                            sessMgrService.c_str(), sessMgrObjPath.c_str(),
+                            sessMgrService.c_str(), sessMgrWEBObjPath.c_str(),
                             DBUS_PROPERTIES_INTERFACE, "Get");
 
                         msgFetch.append(sessMgrWebIface.c_str(),
                                         "WebSessionInfo");
 
                         auto reply0 = bus.call(msgFetch);
-                        reply0.read(propertyVar);
+                        reply0.read(webPropertyVar);
 
-                        if (std::holds_alternative<sessionList>(propertyVar))
+                        if (std::holds_alternative<webSessionList>(
+                                webPropertyVar))
                         {
-                            sessionList& webSesionList =
-                                std::get<sessionList>(propertyVar);
+                            webSessionList& webSessions =
+                                std::get<webSessionList>(webPropertyVar);
 
-                            if (!webSesionList.empty())
+                            if (!webSessions.empty())
                             {
-                                for (const auto& webSession : webSesionList)
+                                for (const auto& webSession : webSessions)
                                 {
                                     if (webSessionId ==
                                         (static_cast<uint8_t>(
@@ -1500,14 +1520,11 @@ struct UsbGadget
                                                 std::get<4>(webSession)),
                                             " userId: ",
                                             static_cast<int>(
-                                                std::get<5>(webSession)),
-                                            " mountingMethod: ",
-                                            std::get<6>(webSession));
+                                                std::get<5>(webSession)));
 
                                         sessionId = DEFAULT_SID;
                                         ipAddr = std::get<1>(webSession);
                                         userName = std::get<2>(webSession);
-                                        ;
                                         sessionType = VMEDIA;
                                         previlage = static_cast<uint8_t>(
                                             std::get<4>(webSession));
@@ -1559,11 +1576,11 @@ struct UsbGadget
                 }
 
                 auto msgReg = bus.new_method_call(
-                    sessMgrService.c_str(), sessMgrObjPath.c_str(),
-                    sessMgrIface.c_str(), "SessionRegister");
+                    sessMgrService.c_str(), sessMgrVmediaObjPath.c_str(),
+                    sessMgrVmediaIface.c_str(), "VmediaSessionRegister");
 
                 msgReg.append(sessionId, ipAddr, userName, sessionType,
-                              previlage, userId, mountingMethod);
+                              previlage, userId, mountingMethod, name);
 
                 auto reply = bus.call(msgReg);
                 reply.read(status);
@@ -1571,19 +1588,20 @@ struct UsbGadget
                 {
                     /* Get and update the SessionID in activeSessons */
                     auto msgGet = bus.new_method_call(
-                        sessMgrService.c_str(), sessMgrObjPath.c_str(),
+                        sessMgrService.c_str(), sessMgrVmediaObjPath.c_str(),
                         DBUS_PROPERTIES_INTERFACE, "Get");
 
                     msgGet.append(sessMgrVmediaIface.c_str(),
                                   "VmediaSessionInfo");
 
                     auto reply1 = bus.call(msgGet);
-                    reply1.read(propertyVar);
+                    reply1.read(vmediaPropertyVar);
 
-                    if (std::holds_alternative<sessionList>(propertyVar))
+                    if (std::holds_alternative<vmediaSessionList>(
+                            vmediaPropertyVar))
                     {
-                        sessionList& sesList =
-                            std::get<sessionList>(propertyVar);
+                        vmediaSessionList& sesList =
+                            std::get<vmediaSessionList>(vmediaPropertyVar);
 
                         if (!sesList.empty())
                         {
@@ -1709,13 +1727,13 @@ struct UsbGadget
                     else
                     {
 #ifdef MULTI_HOST_DEFAULT_MODE
-                        if (usbVirtualHub == "12011000" ||
-                            usbVirtualHub == "12060000" ||
+                        if (usbVirtualHub == "12060000" ||
                             usbVirtualHub == "12062000" ||
                             usbVirtualHub == "12021000")
 #else
                         if (usbVirtualHub == "ci_hdrc" ||
                             usbVirtualHub == "1e6a0000" ||
+                            usbVirtualHub == "12011000" ||
                             usbVirtualHub == "12060000")
 #endif
                         {
@@ -1863,8 +1881,8 @@ struct UsbGadget
 
             auto busUnreg = sdbusplus::bus::new_system();
             auto msgUnreg = busUnreg.new_method_call(
-                sessMgrService.c_str(), sessMgrObjPath.c_str(),
-                sessMgrIface.c_str(), "SessionUnregister");
+                sessMgrService.c_str(), sessMgrVmediaObjPath.c_str(),
+                sessMgrVmediaIface.c_str(), "VmediaSessionUnregister");
 
             msgUnreg.append(sessionId, sessionType, reason);
             auto reply = busUnreg.call(msgUnreg);
