@@ -168,6 +168,18 @@ std::unique_ptr<BasicState> ActivatingState::activateLegacyMode()
 
     if (isCifsUrl(machine.getTarget()->imgUrl))
     {
+        if (!machine.getTarget()->credentials ||
+            machine.getTarget()->credentials->user().empty() ||
+            machine.getTarget()->credentials->password().empty())
+        {
+            LogMsg(Logger::Error, machine.getName(),
+                   " The action InsertMedia requires the parameter "
+                   "Username/password to be present in the request body");
+            return std::make_unique<ReadyState>(
+                machine, std::errc::connection_refused,
+                "The action InsertMedia requires the parameter "
+                "Username/password to be present in the request body");
+        }
         std::string user = machine.getTarget()->credentials->user();
         std::string pass = machine.getTarget()->credentials->password();
         creds[slotNumber] = std::make_shared<Credentials>(
@@ -185,6 +197,18 @@ std::unique_ptr<BasicState> ActivatingState::activateLegacyMode()
     }
     else if (isHttpsUrl(machine.getTarget()->imgUrl))
     {
+        if (!machine.getTarget()->credentials ||
+            machine.getTarget()->credentials->user().empty() ||
+            machine.getTarget()->credentials->password().empty())
+        {
+            LogMsg(Logger::Error, machine.getName(),
+                   " The action InsertMedia requires the parameter "
+                   "Username/password to be present in the request body");
+            return std::make_unique<ReadyState>(
+                machine, std::errc::connection_refused,
+                "The action InsertMedia requires the parameter "
+                "Username/password to be present in the request body");
+        }
         return mountHttpsShare();
     }
     else if (isNfsUrl(machine.getTarget()->imgUrl))
