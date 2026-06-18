@@ -1731,8 +1731,7 @@ struct UsbGadget
                             usbVirtualHub == "12062000" ||
                             usbVirtualHub == "12021000")
 #else
-                        if (usbVirtualHub == "ci_hdrc" ||
-                            usbVirtualHub == "1e6a0000" ||
+                        if (usbVirtualHub == "1e6a0000" ||
                             usbVirtualHub == "12011000" ||
                             usbVirtualHub == "12060000")
 #endif
