@@ -3,6 +3,7 @@
 #include "logger.hpp"
 #include "utils.hpp"
 
+#include <cerrno>
 #include <filesystem>
 #include <optional>
 
@@ -13,9 +14,9 @@ class NfsShare
   public:
     NfsShare(const fs::path& mountDir) : mountDir(mountDir) {}
 
-    bool mount(const fs::path& remote, bool rw)
+    int mount(const fs::path& remote, bool rw)
     {
-        std::string options = "soft";
+        std::string options = "soft,timeo=30,retrans=1";
         std::string remoteNfsPath = "";
         std::string fs = "nfs4";
         unsigned long flags = (rw ? 0 : MS_RDONLY);
@@ -26,23 +27,39 @@ class NfsShare
         {
             LogMsg(Logger::Info, "NFS Mount failed when parsing remote path ",
                    remote);
-            return 1;
+            return EINVAL;
         }
 
         auto ec = utils::safeMount(remoteNfsPath, mountDir, fs, flags, options);
+        int mountErrno = (ec != 0) ? errno : 0;
 
-        if (ec)
+        // Skip NFSv3 fallback if host is unreachable or timed out.
+        if (ec && mountErrno != ETIMEDOUT && mountErrno != EHOSTUNREACH &&
+            mountErrno != ENETUNREACH && mountErrno != EHOSTDOWN)
         {
             fs = "nfs";
             options += ",nolock";
             ec = utils::safeMount(remoteNfsPath, mountDir, fs, flags, options);
+            mountErrno = (ec != 0) ? errno : 0;
         }
 
-        if (ec)
+        if (mountErrno == EACCES)
         {
-            return false;
+            mountErrno = EPERM;
         }
-        return true;
+        else if (mountErrno == ENETUNREACH || mountErrno == EHOSTUNREACH ||
+                 mountErrno == EHOSTDOWN || mountErrno == EADDRNOTAVAIL ||
+                 mountErrno == ETIMEDOUT)
+        {
+            mountErrno = EHOSTUNREACH;
+        }
+        else if (mountErrno == ECONNREFUSED || mountErrno == ENOTCONN ||
+                 mountErrno == EOPNOTSUPP)
+        {
+            mountErrno = ECONNREFUSED;
+        }
+
+        return mountErrno;
     }
 
   private:

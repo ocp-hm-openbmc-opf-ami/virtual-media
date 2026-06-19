@@ -3,6 +3,7 @@
 #include "logger.hpp"
 #include "utils.hpp"
 
+#include <cerrno>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -14,8 +15,8 @@ class SmbShare
   public:
     SmbShare(const fs::path& mountDir) : mountDir(mountDir) {}
 
-    bool mount(const fs::path& remote, bool rw,
-               const std::unique_ptr<utils::CredentialsProvider>& credentials)
+    int mount(const fs::path& remote, bool rw,
+              const std::unique_ptr<utils::CredentialsProvider>& credentials)
     {
         LogMsg(Logger::Debug, "Trying to mount remote : ", remote);
 
@@ -37,7 +38,7 @@ class SmbShare
             {
                 LogMsg(Logger::Error,
                        "Username for CIFS share can't contain ',' character");
-                return false;
+                return EINVAL;
             }
             credentials->escapeCommas();
             credentialsOpt = "username=" + credentials->user() +
@@ -56,14 +57,27 @@ class SmbShare
                                   options + versionOpt);
         }
 
+        int mountErrno = (ec != 0) ? errno : 0;
+
+        if (mountErrno == EACCES || mountErrno == EAGAIN)
+        {
+            mountErrno = EPERM;
+        }
+        else if (mountErrno == ENETUNREACH || mountErrno == EHOSTUNREACH ||
+                 mountErrno == EHOSTDOWN || mountErrno == EADDRNOTAVAIL)
+        {
+            mountErrno = EHOSTUNREACH;
+        }
+        else if (mountErrno == ECONNREFUSED || mountErrno == ENOTCONN ||
+                 mountErrno == EINPROGRESS)
+        {
+            mountErrno = ECONNREFUSED;
+        }
+
         utils::secureCleanup(options);
         utils::secureCleanup(credentialsOpt);
 
-        if (ec)
-        {
-            return false;
-        }
-        return true;
+        return mountErrno;
     }
 
   private:

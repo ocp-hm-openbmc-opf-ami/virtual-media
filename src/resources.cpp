@@ -27,7 +27,13 @@ Gadget::Gadget(interfaces::MountPointStateMachine& machine,
             devState, machine.getTarget() ? machine.getTarget()->rw : false,
             std::string(machine.getAdditionalInfo()));
 
-        if (status == -1)
+        if (status == -2)
+        {
+            LogMsg(Logger::Error,
+                   "Failed to configure USB gadget for: ", machine.getName(),
+                   " - Image size is below minimum supported limit (600KB)");
+        }
+        else if (status == -1)
         {
             LogMsg(
                 Logger::Error,

@@ -48,7 +48,7 @@ class Directory
         {
             LogMsg(Logger::Error, ec,
                    " : Unable to create mount directory: ", path);
-            throw Error(std::errc::io_error,
+            throw Error(std::errc::no_such_file_or_directory,
                         "Failed to create mount directory");
         }
     }
@@ -87,9 +87,10 @@ class Mount
         const std::unique_ptr<utils::CredentialsProvider>& credentials) :
         directory(std::move(directory))
     {
-        if (!smb.mount(remote, rw, credentials))
+        int mountError = smb.mount(remote, rw, credentials);
+        if (mountError != 0)
         {
-            throw Error(std::errc::invalid_argument,
+            throw Error(static_cast<std::errc>(mountError),
                         "Failed to mount CIFS share");
         }
     }
@@ -126,9 +127,10 @@ class NfsMount
                       const std::filesystem::path& remote, bool rw) :
         directory(std::move(directory))
     {
-        if (!nfs.mount(remote, rw))
+        int mountError = nfs.mount(remote, rw);
+        if (mountError != 0)
         {
-            throw Error(std::errc::invalid_argument,
+            throw Error(static_cast<std::errc>(mountError),
                         "Failed to mount NFS share");
         }
     }

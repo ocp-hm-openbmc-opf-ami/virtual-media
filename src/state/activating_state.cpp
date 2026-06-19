@@ -46,8 +46,20 @@ std::unique_ptr<BasicState> ActivatingState::handleEvent(
     if (event.devState == StateChange::inserted)
     {
         gadget = std::make_unique<resource::Gadget>(machine, event.devState);
-        if (gadget->getStatus() == -1)
+        const int32_t gadgetStatus = gadget->getStatus();
+        if (gadgetStatus != 0)
         {
+            if (gadgetStatus == -2)
+            {
+                LogMsg(Logger::Error,
+                       "Skipping redirection: image size is below minimum "
+                       "supported limit (600KB) for ",
+                       machine.getName());
+                return std::make_unique<ReadyState>(
+                    machine, std::errc::result_out_of_range,
+                    "Image size is below minimum supported limit (600KB)");
+            }
+
             LogMsg(Logger::Error,
                    "Skipping redirection: USB gadget configuration failed for ",
                    machine.getName());
@@ -67,8 +79,19 @@ std::unique_ptr<BasicState> ActivatingState::handleEvent(
     [[maybe_unused]] SubprocessStoppedEvent event)
 {
     LogMsg(Logger::Error, "Process ended prematurely");
-    return std::make_unique<ReadyState>(machine, std::errc::connection_refused,
-                                        "Process ended prematurely");
+
+    if (machine.getTarget() && isHttpsUrl(machine.getTarget()->imgUrl))
+    {
+        // HTTPS error refinement using existing nbdkit/curl exit codes.
+        return std::make_unique<ReadyState>(machine, std::errc::protocol_error,
+                                            "HTTPS media redirection failed");
+    }
+
+    // For NFS/CIFS, this means share mount succeeded but file lookup failed;
+    // keep distinct from service-down mount failures.
+    return std::make_unique<ReadyState>(
+        machine, std::errc::no_such_file_or_directory,
+        "Invalid image path or image does not exist");
 }
 
 std::unique_ptr<BasicState> ActivatingState::activateProxyMode()

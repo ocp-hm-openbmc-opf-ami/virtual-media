@@ -1444,7 +1444,7 @@ struct UsbGadget
                 {
                     LogMsg(Logger::Error, "Image file size is too small (",
                            imageSize, " bytes) for: ", path);
-                    return -1;
+                    return -2;
                 }
                 echoToFile(funcMassStorageDir / "lun.0/cdrom",
                            (imgType == 1) ? "1" : "0");
