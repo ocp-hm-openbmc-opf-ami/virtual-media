@@ -1,0 +1,37 @@
+/title [New Repository] <MR Tiltle Name>
+(Kindly follow this format If the new / un-released repositories that will be referenced by OneTree’s latest code after this MR is merged)
+
+/title MR Tiltle Name
+(Kindly follow this format for general cases)
+
+## Issue URL (AMI Internal Use Only)
+(Copy full MegaRAC JIRA Workitem URL and paste here)
+
+## Summary of work done
+(Please base on those items as below to provide information)
+
+### [Issue Description] 
+(Please provide SCA issue list or describes "what the SCA issue or the issue symptom is?". please provide detailed information )
+
+### [Resolution]
+(What solution is used to fix this issue? please provide detailed information)
+
+### [Testing Steps & Results]
+(the Detailed test procedure & the test result "screenshot & test result log")
+
+## Gitlab test image link
+(Please provide the Gitlab Test image link that used for verification)
+
+## Related MR
+(Please include the related MR for this SCA fix if any)
+
+/label ~sca-fix
+(Do not remove this security label)
+
+(Please provide Milestone information)
+
+## Related New / UnRelease Repository
+(Please provide the new / un-released repositories that will be referenced by OneTree’s latest code after this MR is merged.)
+
+## List additional approvers if needed
+```@username1, @username2 ....``` (Remove ``` when adding usernames)
