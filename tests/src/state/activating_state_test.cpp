@@ -74,6 +74,7 @@
 #include "events.hpp"                 // SubprocessStoppedEvent, UnmountEvent
 #include "state/activating_state.hpp" // Class under test (public API)
 #include "state/basic_state.hpp"
+#include "state/ready_state.hpp"      // ReadyState::error for assertions
 #include "utils.hpp"        // utils::CredentialsProvider for SMB credentials
 #include "vm_interface.hpp" // vm::Interface::loadJson(), constructor
 
@@ -241,6 +242,16 @@ class ActivatingStateFixture : public ::testing::Test
 #endif
     }
 };
+
+TEST_F(ActivatingStateFixture,
+       StateNameAndGetIf_WhenConstructed_ReturnExpectedType)
+{
+    ActivatingState state{machine};
+
+    EXPECT_EQ(state.getStateName(), ActivatingState::stateName());
+    EXPECT_NE(state.get_if<ActivatingState>(), nullptr);
+    EXPECT_EQ(state.get_if<ReadyState>(), nullptr);
+}
 
 // ---------- Success-path environment checks ----------------------------------
 namespace
@@ -496,6 +507,60 @@ TEST_F(ActivatingStateFixture, OnEnterLegacy_UnknownUrlSchemeReturnsReadyState)
     EXPECT_EQ(next->getStateName(), "ReadyState");
 }
 
+// ---------- onEnter(): legacy CIFS without credentials → connection_refused
+TEST_F(ActivatingStateFixture,
+       OnEnterLegacy_CifsWithoutCredentialsReturnsReadyState)
+{
+    initVmInterfaceForLegacy();
+
+    mp.mode = Configuration::Mode::legacy;
+    mp.unixSocket = "/tmp/virtual-media-ut/socket.sock";
+    std::error_code ec;
+    std::filesystem::create_directories(
+        std::filesystem::path(mp.unixSocket).parent_path(), ec);
+
+    // smb:// scheme with no credentials on the target -> credential guard
+    setTarget("smb://host/share/file.iso", /*rw=*/false);
+
+    ActivatingState s{machine};
+    auto next = s.onEnter();
+
+    ASSERT_NE(next, nullptr);
+    EXPECT_EQ(next->getStateName(), "ReadyState");
+
+    auto* ready = next->get_if<ReadyState>();
+    ASSERT_NE(ready, nullptr);
+    ASSERT_TRUE(ready->error.has_value());
+    EXPECT_EQ(ready->error->code, std::errc::connection_refused);
+}
+
+// ---------- onEnter(): legacy HTTPS without credentials → connection_refused
+TEST_F(ActivatingStateFixture,
+       OnEnterLegacy_HttpsWithoutCredentialsReturnsReadyState)
+{
+    initVmInterfaceForLegacy();
+
+    mp.mode = Configuration::Mode::legacy;
+    mp.unixSocket = "/tmp/virtual-media-ut/socket.sock";
+    std::error_code ec;
+    std::filesystem::create_directories(
+        std::filesystem::path(mp.unixSocket).parent_path(), ec);
+
+    // https:// scheme with no credentials on the target -> credential guard
+    setTarget("https://host/path/file.iso", /*rw=*/false);
+
+    ActivatingState s{machine};
+    auto next = s.onEnter();
+
+    ASSERT_NE(next, nullptr);
+    EXPECT_EQ(next->getStateName(), "ReadyState");
+
+    auto* ready = next->get_if<ReadyState>();
+    ASSERT_NE(ready, nullptr);
+    ASSERT_TRUE(ready->error.has_value());
+    EXPECT_EQ(ready->error->code, std::errc::connection_refused);
+}
+
 // ---------- Legacy HTTPS: spawnNbdKit(url) failure → ReadyState ------------
 TEST_F(ActivatingStateFixture, OnEnterLegacy_HttpsSpawnFailureReturnsReadyState)
 {
@@ -586,10 +651,62 @@ TEST_F(ActivatingStateFixture, HandleEventSubprocessStoppedReturnsReadyState)
     EXPECT_EQ(next->getStateName(), "ReadyState");
 }
 
+// Target holds an HTTPS URL -> refined protocol_error (distinct from the
+// generic no_such_file_or_directory branch used for NFS/CIFS/local targets).
+TEST_F(ActivatingStateFixture,
+       HandleEventSubprocessStoppedWithHttpsTargetReturnsProtocolError)
+{
+    setTarget("https://host/path/image.iso", /*rw=*/false);
+
+    ActivatingState s{machine};
+    SubprocessStoppedEvent ev{};
+    auto next = s.handleEvent(std::move(ev));
+    ASSERT_NE(next, nullptr);
+    EXPECT_EQ(next->getStateName(), "ReadyState");
+
+    auto* ready = next->get_if<ReadyState>();
+    ASSERT_NE(ready, nullptr);
+    ASSERT_TRUE(ready->error.has_value());
+    EXPECT_EQ(ready->error->code, std::errc::protocol_error);
+}
+
+// Target holds a non-HTTPS URL -> generic no_such_file_or_directory branch.
+TEST_F(ActivatingStateFixture,
+       HandleEventSubprocessStoppedWithNonHttpsTargetReturnsGenericError)
+{
+    setTarget("nfs://host/export/image.iso", /*rw=*/false);
+
+    ActivatingState s{machine};
+    SubprocessStoppedEvent ev{};
+    auto next = s.handleEvent(std::move(ev));
+    ASSERT_NE(next, nullptr);
+    EXPECT_EQ(next->getStateName(), "ReadyState");
+
+    auto* ready = next->get_if<ReadyState>();
+    ASSERT_NE(ready, nullptr);
+    ASSERT_TRUE(ready->error.has_value());
+    EXPECT_EQ(ready->error->code, std::errc::no_such_file_or_directory);
+}
+
 TEST_F(ActivatingStateFixture, UnsupportedEventThrowsSdBusErrorBusy)
 {
     ActivatingState s{machine};
     UnmountEvent ev{};
+    EXPECT_THROW((void)s.handleEvent(std::move(ev)),
+                 sdbusplus::exception::SdBusError);
+}
+
+TEST_F(ActivatingStateFixture,
+       HandleEventMountEvent_WhenAlreadyActivating_ThrowsSdBusErrorBusy)
+{
+    ActivatingState s{machine};
+
+    interfaces::MountPointStateMachine::Target mountTarget{};
+    mountTarget.imgUrl = "https://example.com/another.iso";
+    mountTarget.rw = false;
+
+    MountEvent ev{std::optional<interfaces::MountPointStateMachine::Target>{
+        std::move(mountTarget)}};
     EXPECT_THROW((void)s.handleEvent(std::move(ev)),
                  sdbusplus::exception::SdBusError);
 }

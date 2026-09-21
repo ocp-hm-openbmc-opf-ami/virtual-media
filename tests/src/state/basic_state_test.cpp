@@ -61,6 +61,7 @@
 
 #include "state/basic_state.hpp" // includes events.hpp + mount_point_state_machine.hpp
 
+#include <filesystem>
 #include <memory>
 #include <string_view>
 #include <type_traits>
@@ -121,13 +122,24 @@ struct DummyState : public BasicStateT<DummyState>
 
     // Generic handler: marks that we saw an event, no transition.
     template <class E>
-    std::unique_ptr<BasicState> handleEvent(E)
+    std::unique_ptr<BasicState> handleEvent(E event)
     {
         sawEvent = true;
+        if constexpr (requires { event.eventName; })
+        {
+            lastEventName = event.eventName;
+        }
+        else
+        {
+            lastEventName = std::visit(
+                [](const auto& innerEvent) { return innerEvent.eventName; },
+                event);
+        }
         return nullptr;
     }
 
     bool sawEvent{false};
+    const char* lastEventName{nullptr};
 };
 
 struct OtherState : public BasicStateT<OtherState>
@@ -173,6 +185,17 @@ TEST(BasicStateCore, ConstructionAndStateName)
     (void)baseRef;
 }
 
+TEST(BasicStateCore, BaseClassStoresMachineReference)
+{
+    interfaces::MockMountPointStateMachine machine;
+
+    DummyState s{machine};
+    BasicState* base = &s;
+
+    EXPECT_EQ(&s.machine, &machine);
+    EXPECT_EQ(&base->machine, &machine);
+}
+
 TEST(BasicStateCore, GetIfReturnsMatchingTypeOrNull)
 {
     interfaces::MockMountPointStateMachine machine;
@@ -185,6 +208,17 @@ TEST(BasicStateCore, GetIfReturnsMatchingTypeOrNull)
 
     EXPECT_EQ(o.get_if<OtherState>(), &o);
     EXPECT_EQ(o.get_if<DummyState>(), nullptr);
+}
+
+TEST(BasicStateCore, GetIfWorksThroughBasePointer)
+{
+    interfaces::MockMountPointStateMachine machine;
+
+    DummyState s{machine};
+    BasicState* base = &s;
+
+    EXPECT_EQ(base->get_if<DummyState>(), &s);
+    EXPECT_EQ(base->get_if<OtherState>(), nullptr);
 }
 
 TEST(BasicStateCore, OnEnterDefaultReturnsNullptr)
@@ -212,6 +246,132 @@ TEST(BasicStateCore, HandleEventInvokesTemplatedHandlerAndNoTransition)
     EXPECT_EQ(next, nullptr); // no transition requested
 }
 
+TEST(BasicStateCore, HandleEventRecordsUnmountEventName)
+{
+    interfaces::MockMountPointStateMachine machine;
+    DummyState s{machine};
+
+    Event ev{std::in_place_type<UnmountEvent>};
+    auto next = s.handleEvent(std::move(ev));
+
+    EXPECT_TRUE(s.sawEvent);
+    EXPECT_STREQ(s.lastEventName, "UnmountEvent");
+    EXPECT_EQ(next, nullptr);
+}
+
+TEST(BasicStateCore, BaseReferenceDispatchesMountEventVariant)
+{
+    interfaces::MockMountPointStateMachine machine;
+    DummyState s{machine};
+    BasicState& base = s;
+
+    interfaces::MountPointStateMachine::Target target{};
+    target.imgUrl = "https://example.com/mount.iso";
+    target.rw = false;
+
+    Event ev{std::in_place_type<MountEvent>,
+             std::optional<interfaces::MountPointStateMachine::Target>{
+                 std::move(target)}};
+    auto next = base.handleEvent(std::move(ev));
+
+    EXPECT_TRUE(s.sawEvent);
+    EXPECT_EQ(next, nullptr);
+}
+
+TEST(BasicStateCore, HandleEventDispatchesRegisterEventVariant)
+{
+    interfaces::MockMountPointStateMachine machine;
+    DummyState s{machine};
+
+    Event ev{std::in_place_type<RegisterDbusEvent>, nullptr, nullptr};
+    auto next = s.handleEvent(std::move(ev));
+
+    EXPECT_TRUE(s.sawEvent);
+    EXPECT_EQ(next, nullptr);
+}
+
+TEST(BasicStateCore, HandleEventRecordsRegisterDbusEventName)
+{
+    interfaces::MockMountPointStateMachine machine;
+    DummyState s{machine};
+
+    Event ev{std::in_place_type<RegisterDbusEvent>, nullptr, nullptr};
+    auto next = s.handleEvent(std::move(ev));
+
+    EXPECT_TRUE(s.sawEvent);
+    EXPECT_STREQ(s.lastEventName, "RegisterDbusEvent");
+    EXPECT_EQ(next, nullptr);
+}
+
+TEST(BasicStateCore, HandleEventRecordsMountEventName)
+{
+    interfaces::MockMountPointStateMachine machine;
+    DummyState s{machine};
+
+    interfaces::MountPointStateMachine::Target target{};
+    target.imgUrl = "https://example.com/mount.iso";
+    Event ev{std::in_place_type<MountEvent>,
+             std::optional<interfaces::MountPointStateMachine::Target>{
+                 std::move(target)}};
+    auto next = s.handleEvent(std::move(ev));
+
+    EXPECT_TRUE(s.sawEvent);
+    EXPECT_STREQ(s.lastEventName, "MountEvent");
+    EXPECT_EQ(next, nullptr);
+}
+
+TEST(BasicStateCore, BaseReferenceDispatchesSubprocessStoppedVariant)
+{
+    interfaces::MockMountPointStateMachine machine;
+    DummyState s{machine};
+    BasicState& base = s;
+
+    Event ev{std::in_place_type<SubprocessStoppedEvent>};
+    auto next = base.handleEvent(std::move(ev));
+
+    EXPECT_TRUE(s.sawEvent);
+    EXPECT_EQ(next, nullptr);
+}
+
+TEST(BasicStateCore, HandleEventRecordsSubprocessStoppedEventName)
+{
+    interfaces::MockMountPointStateMachine machine;
+    DummyState s{machine};
+
+    Event ev{std::in_place_type<SubprocessStoppedEvent>};
+    auto next = s.handleEvent(std::move(ev));
+
+    EXPECT_TRUE(s.sawEvent);
+    EXPECT_STREQ(s.lastEventName, "SubprocessStoppedEvent");
+    EXPECT_EQ(next, nullptr);
+}
+
+TEST(BasicStateCore, BaseReferenceDispatchesUdevStateChangeVariant)
+{
+    interfaces::MockMountPointStateMachine machine;
+    DummyState s{machine};
+    BasicState& base = s;
+
+    Event ev{std::in_place_type<UdevStateChangeEvent>, StateChange::inserted};
+    auto next = base.handleEvent(std::move(ev));
+
+    EXPECT_TRUE(s.sawEvent);
+    EXPECT_EQ(next, nullptr);
+}
+
+TEST(BasicStateCore, HandleEventRecordsUdevStateChangeEventName)
+{
+    interfaces::MockMountPointStateMachine machine;
+    DummyState s{machine};
+
+    Event ev{std::in_place_type<UdevStateChangeEvent>, StateChange::inserted};
+    auto next = s.handleEvent(std::move(ev));
+
+    EXPECT_TRUE(s.sawEvent);
+    EXPECT_STREQ(s.lastEventName, "UdevStateChangeEvent");
+    EXPECT_EQ(next, nullptr);
+}
+
 TEST(BasicStateCore, HandleEventCanReturnTransitionToAnotherState)
 {
     interfaces::MockMountPointStateMachine machine;
@@ -224,4 +384,47 @@ TEST(BasicStateCore, HandleEventCanReturnTransitionToAnotherState)
     EXPECT_EQ(next->getStateName(), DummyState::stateName());
     auto* asDummy = next->get_if<DummyState>();
     ASSERT_NE(asDummy, nullptr);
+}
+
+TEST(BasicStateCore, BaseReferenceCanReturnTransitionToAnotherState)
+{
+    interfaces::MockMountPointStateMachine machine;
+    OtherState s{machine};
+    BasicState& base = s;
+
+    Event ev{std::in_place_type<RegisterDbusEvent>, nullptr, nullptr};
+    auto next = base.handleEvent(std::move(ev));
+
+    ASSERT_NE(next, nullptr);
+    EXPECT_EQ(next->getStateName(), DummyState::stateName());
+    EXPECT_NE(next->get_if<DummyState>(), nullptr);
+}
+
+TEST(BasicStateCore, TransitionKeepsOriginalMachineReference)
+{
+    interfaces::MockMountPointStateMachine machine;
+    OtherState s{machine};
+
+    Event ev{std::in_place_type<UnmountEvent>};
+    auto next = s.handleEvent(std::move(ev));
+
+    ASSERT_NE(next, nullptr);
+    EXPECT_EQ(&next->machine, &machine);
+}
+
+TEST(BasicStateCore, BaseReferenceOnEnterUsesDefaultImplementation)
+{
+    interfaces::MockMountPointStateMachine machine;
+    DummyState s{machine};
+    BasicState& base = s;
+
+    EXPECT_EQ(base.onEnter(), nullptr);
+}
+
+TEST(BasicStateCore, DestroyingPolymorphicDummyStateIsSafe)
+{
+    interfaces::MockMountPointStateMachine machine;
+    std::unique_ptr<BasicState> state = std::make_unique<DummyState>(machine);
+
+    EXPECT_EQ(state->getStateName(), DummyState::stateName());
 }

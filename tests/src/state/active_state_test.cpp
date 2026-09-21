@@ -194,6 +194,23 @@ class ActiveStateFixture : public ::testing::Test
     }
 };
 
+template <typename Func>
+static void expectSdBusError(Func&& func, int expectedErrno,
+                             std::string_view expectedMessagePart)
+{
+    try
+    {
+        std::forward<Func>(func)();
+        FAIL() << "Expected sdbusplus::exception::SdBusError";
+    }
+    catch (const sdbusplus::exception::SdBusError& error)
+    {
+        EXPECT_EQ(error.get_errno(), expectedErrno);
+        EXPECT_THAT(std::string(error.what()),
+                    ::testing::HasSubstr(std::string(expectedMessagePart)));
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -234,13 +251,13 @@ TEST_F(ActiveStateFixture,
     EXPECT_EQ(next->getStateName(), DeactivatingState::stateName());
 }
 
-// 4) Mount event -> throws SdBusError(EPERM)
-TEST_F(ActiveStateFixture, HandleEventMountThrowsSdBusErrorPerm)
+// 4) Mount event -> throws SdBusError (caller-visible errno is EACCES)
+TEST_F(ActiveStateFixture, HandleEventMountThrowsSdBusErrorAccessDenied)
 {
     auto s = makeActive(machine);
     MountEvent ev{std::nullopt};
-    EXPECT_THROW((void)s.handleEvent(std::move(ev)),
-                 sdbusplus::exception::SdBusError);
+    expectSdBusError([&] { (void)s.handleEvent(std::move(ev)); }, EACCES,
+                     "Operation not permitted in active state");
 }
 
 // 5) onEnter(): inactivity disabled -> returns nullptr
@@ -286,6 +303,22 @@ TEST_F(ActiveStateFixture, OnEnterHandlerExpiredPostsEmitUnmountEvent)
     s.onEnter();
 
     s.lastAccess = std::chrono::steady_clock::now() - std::chrono::seconds(9);
+
+    EXPECT_CALL(machine, emitUnmountEvent()).Times(1);
+
+    const boost::system::error_code ok;
+    s.handler(ok);
+    machine.getIoc().poll();
+}
+
+// 8b) Handler exactly at timeout boundary -> post emitUnmountEvent()
+TEST_F(ActiveStateFixture, OnEnterHandlerAtExactTimeoutBoundaryPostsUnmount)
+{
+    Configuration::inactivityTimeout = std::chrono::seconds(5);
+    ActiveState s{machine, {}, {}};
+    s.onEnter();
+
+    s.lastAccess = std::chrono::steady_clock::now() - std::chrono::seconds(5);
 
     EXPECT_CALL(machine, emitUnmountEvent()).Times(1);
 
@@ -384,6 +417,6 @@ TEST_F(ActiveStateFixture, HandleEventUnsupportedAnyEventThrowsEOpNotSupp)
 {
     auto s = makeActive(machine);
     RegisterDbusEvent ev{nullptr, nullptr};
-    EXPECT_THROW((void)s.handleEvent(std::move(ev)),
-                 sdbusplus::exception::SdBusError);
+    expectSdBusError([&] { (void)s.handleEvent(std::move(ev)); }, EOPNOTSUPP,
+                     "Operation not supported in active state");
 }

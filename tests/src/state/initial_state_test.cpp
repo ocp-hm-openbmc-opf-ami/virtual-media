@@ -50,6 +50,7 @@
 #include "interfaces/mount_point_state_machine.hpp"
 #include "state/basic_state.hpp"
 #include "state/ready_state.hpp"
+#include "utils.hpp"
 
 #include <boost/asio/io_context.hpp>
 #include <sdbusplus/asio/connection.hpp>
@@ -59,6 +60,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -69,6 +72,7 @@
 #include <gtest/gtest.h>
 
 namespace fs = std::filesystem;
+using ::testing::HasSubstr;
 
 //=============================================================================
 // Test Infrastructure - USB Gadget Shim
@@ -336,6 +340,273 @@ static inline void legacy_parse_or_throw(const std::array<char, N>& buf,
     legacy_parse_or_throw_span(buf.data(), size);
 }
 
+constexpr auto kDbusMethodTimeout = std::chrono::seconds(3);
+constexpr auto kDbusPollInterval = std::chrono::milliseconds(10);
+constexpr int kDbusMaxPolls = 400;
+
+template <typename ResultType>
+static ResultType waitForDbusFuture(
+    std::future<ResultType>& future, sdbusplus::bus_t& serverBus,
+    boost::asio::io_context* io = nullptr,
+    const char* timeoutMessage = "Timed out waiting for D-Bus reply")
+{
+    for (int attempt = 0; attempt < kDbusMaxPolls; ++attempt)
+    {
+        if (future.wait_for(std::chrono::milliseconds(0)) ==
+            std::future_status::ready)
+        {
+            return future.get();
+        }
+        serverBus.wait(kDbusPollInterval);
+        while (serverBus.process_discard())
+        {}
+        if (io != nullptr)
+        {
+            io->poll();
+            io->restart();
+        }
+    }
+
+    throw std::runtime_error(timeoutMessage);
+}
+
+template <typename Func>
+static void expectSdBusError(Func&& func, int expectedErrno,
+                             std::string_view expectedMessagePart)
+{
+    try
+    {
+        std::forward<Func>(func)();
+        FAIL() << "Expected sdbusplus::exception::SdBusError";
+    }
+    catch (const sdbusplus::exception::SdBusError& error)
+    {
+        EXPECT_EQ(error.get_errno(), expectedErrno);
+        EXPECT_THAT(std::string(error.what()),
+                    HasSubstr(std::string(expectedMessagePart)));
+    }
+}
+
+static std::vector<std::string> callListAvailableSlotsOverDbus(
+    sdbusplus::bus_t& serverBus, const std::string& service)
+{
+    auto future = std::async(std::launch::async, [&service]() {
+        auto clientBus = sdbusplus::bus::new_bus();
+        auto msg = clientBus.new_method_call(
+            service.c_str(), "/xyz/openbmc_project/VirtualMedia/Local",
+            "xyz.openbmc_project.VirtualMedia.Local", "ListAvailableSlots");
+
+        auto reply = clientBus.call(msg, std::chrono::seconds(1));
+        std::vector<std::string> slots;
+        reply.read(slots);
+        return slots;
+    });
+
+    return waitForDbusFuture(future, serverBus, nullptr,
+                             "Timed out waiting for D-Bus method reply");
+}
+
+static std::string callLocalMountOverDbus(sdbusplus::bus_t& serverBus,
+                                          const std::string& service,
+                                          const std::string& imagePath, bool rw)
+{
+    auto future = std::async(
+        std::launch::async, [&service, &imagePath, rw]() -> std::string {
+            auto clientBus = sdbusplus::bus::new_bus();
+            auto msg = clientBus.new_method_call(
+                service.c_str(), "/xyz/openbmc_project/VirtualMedia/Local",
+                "xyz.openbmc_project.VirtualMedia.Local", "Mount");
+            msg.append(imagePath, rw);
+
+            auto reply = clientBus.call(msg, kDbusMethodTimeout);
+            std::string slot;
+            reply.read(slot);
+            return slot;
+        });
+
+    return waitForDbusFuture(future, serverBus, nullptr,
+                             "Timed out waiting for D-Bus method reply");
+}
+
+static bool callLocalUnmountOverDbus(sdbusplus::bus_t& serverBus,
+                                     const std::string& service)
+{
+    auto future = std::async(std::launch::async, [&service]() {
+        auto clientBus = sdbusplus::bus::new_bus();
+        auto msg = clientBus.new_method_call(
+            service.c_str(), "/xyz/openbmc_project/VirtualMedia/Local",
+            "xyz.openbmc_project.VirtualMedia.Local", "Unmount");
+
+        auto reply = clientBus.call(msg, std::chrono::seconds(1));
+        bool result = false;
+        reply.read(result);
+        return result;
+    });
+
+    return waitForDbusFuture(future, serverBus, nullptr,
+                             "Timed out waiting for D-Bus method reply");
+}
+
+static std::string callCurrentLocalMountOverDbus(sdbusplus::bus_t& serverBus,
+                                                 const std::string& service)
+{
+    auto future = std::async(std::launch::async, [&service]() {
+        auto clientBus = sdbusplus::bus::new_bus();
+        auto msg = clientBus.new_method_call(
+            service.c_str(), "/xyz/openbmc_project/VirtualMedia/Local",
+            "xyz.openbmc_project.VirtualMedia.Local", "GetCurrentMount");
+
+        auto reply = clientBus.call(msg, std::chrono::seconds(1));
+        std::string currentMount;
+        reply.read(currentMount);
+        return currentMount;
+    });
+
+    return waitForDbusFuture(future, serverBus, nullptr,
+                             "Timed out waiting for D-Bus method reply");
+}
+
+static bool callProxyMountOverDbus(
+    sdbusplus::bus_t& serverBus, const std::string& service,
+    const std::string& path, const std::string& additionalInfo)
+{
+    auto future =
+        std::async(std::launch::async, [&service, &path, &additionalInfo]() {
+            auto clientBus = sdbusplus::bus::new_bus();
+            auto msg = clientBus.new_method_call(
+                service.c_str(), path.c_str(),
+                "xyz.openbmc_project.VirtualMedia.Proxy", "Mount");
+            msg.append(additionalInfo);
+
+            auto reply = clientBus.call(msg, kDbusMethodTimeout);
+            bool result = false;
+            reply.read(result);
+            return result;
+        });
+
+    return waitForDbusFuture(future, serverBus, nullptr,
+                             "Timed out waiting for D-Bus method reply");
+}
+
+static bool callLegacyMountOverDbus(
+    boost::asio::io_context& io, sdbusplus::bus_t& serverBus,
+    const std::string& service, const std::string& path,
+    const std::string& imageUrl, bool rw, int fd,
+    const std::string& additionalInfo)
+{
+    auto future = std::async(std::launch::async, [&service, &path, &imageUrl,
+                                                  rw, fd, &additionalInfo]() {
+        auto clientBus = sdbusplus::bus::new_bus();
+        auto msg = clientBus.new_method_call(
+            service.c_str(), path.c_str(),
+            "xyz.openbmc_project.VirtualMedia.Legacy", "Mount");
+        msg.append(imageUrl, rw,
+                   std::variant<int, sdbusplus::message::unix_fd>{
+                       sdbusplus::message::unix_fd{fd}},
+                   additionalInfo);
+
+        auto reply = clientBus.call(msg, kDbusMethodTimeout);
+        bool result = false;
+        reply.read(result);
+        return result;
+    });
+
+    return waitForDbusFuture(future, serverBus, &io,
+                             "Timed out waiting for D-Bus method reply");
+}
+
+static bool callLegacyMountOverDbusWithoutSecretFd(
+    boost::asio::io_context& io, sdbusplus::bus_t& serverBus,
+    const std::string& service, const std::string& path,
+    const std::string& imageUrl, bool rw, const std::string& additionalInfo)
+{
+    auto future = std::async(std::launch::async, [&service, &path, &imageUrl,
+                                                  rw, &additionalInfo]() {
+        auto clientBus = sdbusplus::bus::new_bus();
+        auto msg = clientBus.new_method_call(
+            service.c_str(), path.c_str(),
+            "xyz.openbmc_project.VirtualMedia.Legacy", "Mount");
+        msg.append(imageUrl, rw,
+                   std::variant<int, sdbusplus::message::unix_fd>{0},
+                   additionalInfo);
+
+        auto reply = clientBus.call(msg, kDbusMethodTimeout);
+        bool result = false;
+        reply.read(result);
+        return result;
+    });
+
+    return waitForDbusFuture(future, serverBus, &io,
+                             "Timed out waiting for D-Bus method reply");
+}
+
+static bool callProxyUnmountOverDbus(sdbusplus::bus_t& serverBus,
+                                     const std::string& service,
+                                     const std::string& path)
+{
+    auto future = std::async(std::launch::async, [&service, &path]() {
+        auto clientBus = sdbusplus::bus::new_bus();
+        auto msg = clientBus.new_method_call(
+            service.c_str(), path.c_str(),
+            "xyz.openbmc_project.VirtualMedia.Proxy", "Unmount");
+
+        auto reply = clientBus.call(msg, kDbusMethodTimeout);
+        bool result = false;
+        reply.read(result);
+        return result;
+    });
+
+    return waitForDbusFuture(future, serverBus, nullptr,
+                             "Timed out waiting for D-Bus method reply");
+}
+
+template <typename VariantType>
+static VariantType getPropertyOverDbus(
+    sdbusplus::bus_t& serverBus, const std::string& service,
+    const std::string& path, const std::string& interface,
+    const std::string& property)
+{
+    auto future =
+        std::async(std::launch::async,
+                   [&service, &path, &interface, &property]() -> VariantType {
+                       auto clientBus = sdbusplus::bus::new_bus();
+                       auto msg = clientBus.new_method_call(
+                           service.c_str(), path.c_str(),
+                           "org.freedesktop.DBus.Properties", "Get");
+                       msg.append(interface, property);
+
+                       auto reply = clientBus.call(msg, kDbusMethodTimeout);
+                       VariantType value;
+                       reply.read(value);
+                       return value;
+                   });
+
+    return waitForDbusFuture(future, serverBus, nullptr,
+                             "Timed out waiting for D-Bus property reply");
+}
+
+template <typename VariantType>
+static void setPropertyOverDbus(
+    sdbusplus::bus_t& serverBus, const std::string& service,
+    const std::string& path, const std::string& interface,
+    const std::string& property, VariantType value)
+{
+    auto future = std::async(
+        std::launch::async,
+        [&service, &path, &interface, &property, value = std::move(value)]() {
+            auto clientBus = sdbusplus::bus::new_bus();
+            auto msg = clientBus.new_method_call(
+                service.c_str(), path.c_str(),
+                "org.freedesktop.DBus.Properties", "Set");
+            msg.append(interface, property, value);
+            auto reply = clientBus.call(msg, kDbusMethodTimeout);
+            (void)reply;
+        });
+
+    waitForDbusFuture(future, serverBus, nullptr,
+                      "Timed out waiting for D-Bus property set");
+}
+
 // =================================================================================
 // SECTION 1: Tests from initial_state_interfaces_singlethread_test.cpp (7
 // tests)
@@ -398,10 +669,23 @@ class InitialStateFixture : public ::testing::Test
         readyRef = std::make_unique<ReadyState>(machine);
         ON_CALL(machine, getState()).WillByDefault(ReturnRef(*readyRef));
 
-        bus = suiteBus;
-        objServer = suiteObjServer;
+        bus = std::make_shared<sdbusplus::asio::connection>(
+            ioc, sdbusplus::bus::new_bus());
+        objServer = std::make_shared<sdbusplus::asio::object_server>(bus);
 
         InitialState::allMountPoints.clear();
+        InitialState::globalLocalServiceCreated = false;
+        InitialState::globalObjServer.reset();
+        UsbGadgetTestShim::reset();
+    }
+
+    void TearDown() override
+    {
+        InitialState::allMountPoints.clear();
+        InitialState::globalLocalServiceCreated = false;
+        InitialState::globalObjServer.reset();
+        objServer.reset();
+        bus.reset();
         UsbGadgetTestShim::reset();
     }
 
@@ -485,6 +769,14 @@ TEST_F(InitialStateFixture, GetObjectPathMapsModeToPathPrefix)
               "/xyz/openbmc_project/VirtualMedia/Legacy/");
 }
 
+TEST_F(InitialStateFixture, GetObjectPathFallsBackToLegacyForUnexpectedMode)
+{
+    mp.mode = static_cast<Configuration::Mode>(255);
+
+    EXPECT_EQ(InitialState::getObjectPath(machine),
+              "/xyz/openbmc_project/VirtualMedia/Legacy/");
+}
+
 /**
  * @test Verify D-Bus service registration and state transition for proxy mode
  * @brief Validates RegisterDbusEvent handling creates D-Bus interfaces and
@@ -532,6 +824,1292 @@ TEST_F(InitialStateFixture,
     // Assert: Global service flags set (shared across all mount points)
     EXPECT_TRUE(InitialState::globalLocalServiceCreated);
     ASSERT_TRUE(InitialState::globalObjServer);
+}
+
+TEST_F(InitialStateFixture, AddGlobalLocalMountServiceStoresMachineAndServer)
+{
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    InitialState s{machine};
+    s.addGlobalLocalMountService(makeRegisterEvent());
+
+    ASSERT_TRUE(InitialState::globalObjServer);
+    EXPECT_EQ(InitialState::globalObjServer, objServer);
+    ASSERT_TRUE(
+        InitialState::allMountPoints.count(std::string(machine.getName())));
+    EXPECT_EQ(InitialState::allMountPoints[std::string(machine.getName())],
+              &machine);
+    EXPECT_TRUE(InitialState::globalLocalServiceCreated);
+}
+
+TEST_F(InitialStateFixture, GlobalLocalServiceListAvailableSlotsViaDbus)
+{
+    using ::testing::ElementsAre;
+    using ::testing::Return;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+
+    const std::string expectedPath =
+        "/xyz/openbmc_project/VirtualMedia/Local/" + nameStr;
+
+    EXPECT_CALL(machine,
+                notificationInitialize(localBus, expectedPath,
+                                       "xyz.openbmc_project.VirtualMedia.Proxy",
+                                       "Completion"))
+        .Times(1);
+
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+    EXPECT_EQ(next->getStateName(), ReadyState::stateName());
+
+    auto slots =
+        callListAvailableSlotsOverDbus(*localBus, localBus->get_unique_name());
+    EXPECT_THAT(slots, ElementsAre("Slot_0"));
+}
+
+TEST_F(InitialStateFixture, GlobalLocalServiceMountViaDbusAssignsReadySlot)
+{
+    using ::testing::Return;
+    using ::testing::Truly;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+
+    const std::string expectedPath =
+        "/xyz/openbmc_project/VirtualMedia/Local/" + nameStr;
+    EXPECT_CALL(machine,
+                notificationInitialize(localBus, expectedPath,
+                                       "xyz.openbmc_project.VirtualMedia.Proxy",
+                                       "Completion"))
+        .Times(1);
+
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+    EXPECT_EQ(next->getStateName(), ReadyState::stateName());
+
+    fs::create_directories("/tmp/lmedia");
+    const std::string imagePath = "/tmp/lmedia/ut_local_dbus.bin";
+    {
+        std::ofstream ofs(imagePath, std::ios::binary | std::ios::trunc);
+        ofs.seekp(0x8001);
+        ofs.write("HD001", 5);
+    }
+
+    EXPECT_CALL(machine, setAdditionalInfo("LMEDIA")).Times(1);
+    EXPECT_CALL(
+        machine,
+        emitMountEvent(Truly(
+            [&](const std::optional<interfaces::MountPointStateMachine::Target>&
+                    mountTarget) {
+                return mountTarget && mountTarget->imgUrl == imagePath &&
+                       mountTarget->rw;
+            })))
+        .Times(1);
+
+    auto slot = callLocalMountOverDbus(*localBus, localBus->get_unique_name(),
+                                       imagePath, true);
+    EXPECT_EQ(slot, "Slot_0");
+}
+
+TEST_F(
+    InitialStateFixture,
+    GlobalLocalServiceMountAssignsFirstPresentReadySlotWhenEarlierSlotsMissing)
+{
+    using ::testing::Return;
+    using ::testing::Truly;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_2";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+
+    const std::string expectedPath =
+        "/xyz/openbmc_project/VirtualMedia/Local/" + nameStr;
+    EXPECT_CALL(machine,
+                notificationInitialize(localBus, expectedPath,
+                                       "xyz.openbmc_project.VirtualMedia.Proxy",
+                                       "Completion"))
+        .Times(1);
+
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+    EXPECT_EQ(next->getStateName(), ReadyState::stateName());
+
+    fs::create_directories("/tmp/lmedia");
+    const std::string imagePath = "/tmp/lmedia/ut_partial_registry.bin";
+    {
+        std::ofstream ofs(imagePath, std::ios::binary | std::ios::trunc);
+        ofs.seekp(0x8001);
+        ofs.write("HD001", 5);
+    }
+
+    EXPECT_CALL(machine, setAdditionalInfo("LMEDIA")).Times(1);
+    EXPECT_CALL(
+        machine,
+        emitMountEvent(Truly(
+            [&](const std::optional<interfaces::MountPointStateMachine::Target>&
+                    mountTarget) {
+                return mountTarget && mountTarget->imgUrl == imagePath &&
+                       !mountTarget->rw;
+            })))
+        .Times(1);
+
+    auto slot = callLocalMountOverDbus(*localBus, localBus->get_unique_name(),
+                                       imagePath, false);
+    EXPECT_EQ(slot, "Slot_2");
+
+    std::error_code ec;
+    fs::remove(imagePath, ec);
+}
+
+TEST_F(InitialStateFixture, GlobalLocalServiceReportsCurrentMountViaDbus)
+{
+    using ::testing::Return;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    fs::create_directories("/tmp/lmedia");
+    const std::string imagePath = "/tmp/lmedia/ut_current_mount.bin";
+    {
+        std::ofstream ofs(imagePath, std::ios::binary | std::ios::trunc);
+        ofs << "mounted";
+    }
+    target.emplace();
+    target->imgUrl = imagePath;
+    target->rw = false;
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+
+    EXPECT_CALL(machine,
+                notificationInitialize(
+                    localBus, "/xyz/openbmc_project/VirtualMedia/Local/Slot_0",
+                    "xyz.openbmc_project.VirtualMedia.Proxy", "Completion"))
+        .Times(1);
+
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+
+    auto current =
+        callCurrentLocalMountOverDbus(*localBus, localBus->get_unique_name());
+    EXPECT_EQ(current, "Slot_0:" + imagePath);
+}
+
+TEST_F(InitialStateFixture, GlobalLocalServiceUnmountViaDbusReturnsTrue)
+{
+    using ::testing::Return;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    fs::create_directories("/tmp/lmedia");
+    const std::string imagePath = "/tmp/lmedia/ut_unmount_dbus.bin";
+    {
+        std::ofstream ofs(imagePath, std::ios::binary | std::ios::trunc);
+        ofs << "mounted";
+    }
+    target.emplace();
+    target->imgUrl = imagePath;
+    target->rw = false;
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+
+    EXPECT_CALL(machine,
+                notificationInitialize(
+                    localBus, "/xyz/openbmc_project/VirtualMedia/Local/Slot_0",
+                    "xyz.openbmc_project.VirtualMedia.Proxy", "Completion"))
+        .Times(1);
+
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+
+    EXPECT_CALL(machine, emitUnmountEvent()).Times(1);
+    EXPECT_TRUE(
+        callLocalUnmountOverDbus(*localBus, localBus->get_unique_name()));
+}
+
+TEST_F(InitialStateFixture, GlobalLocalServiceMountRejectsMissingFile)
+{
+    using ::testing::Return;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+
+    EXPECT_THROW(
+        callLocalMountOverDbus(*localBus, localBus->get_unique_name(),
+                               "/tmp/lmedia/missing-ut-file.iso", false),
+        sdbusplus::exception::SdBusError);
+}
+
+TEST_F(InitialStateFixture, GlobalLocalServiceMountRejectsDirectory)
+{
+    using ::testing::Return;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    fs::create_directories("/tmp/lmedia");
+    const std::string dirPath = "/tmp/lmedia/ut_dir_mount";
+    std::error_code ec;
+    fs::remove_all(dirPath, ec);
+    fs::create_directories(dirPath, ec);
+    ASSERT_FALSE(ec);
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+
+    expectSdBusError(
+        [&] {
+            (void)callLocalMountOverDbus(*localBus, localBus->get_unique_name(),
+                                         dirPath, false);
+        },
+        EINVAL, "InvalidArgs");
+
+    fs::remove_all(dirPath, ec);
+}
+
+TEST_F(InitialStateFixture, GlobalLocalServiceMountRejectsCdWithWriteAccess)
+{
+    using ::testing::Return;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    fs::create_directories("/tmp/lmedia");
+    const std::string imagePath = "/tmp/lmedia/ut_cd_image.iso";
+    {
+        std::ofstream ofs(imagePath, std::ios::binary | std::ios::trunc);
+        ofs.seekp(0x8001);
+        ofs.write("CD001", 5);
+    }
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+
+    expectSdBusError(
+        [&] {
+            (void)callLocalMountOverDbus(*localBus, localBus->get_unique_name(),
+                                         imagePath, true);
+        },
+        EACCES, "AccessDenied");
+
+    std::error_code ec;
+    fs::remove(imagePath, ec);
+}
+
+TEST_F(InitialStateFixture, GlobalLocalServiceGetCurrentMountReturnsEmpty)
+{
+    using ::testing::Return;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+
+    EXPECT_EQ(
+        callCurrentLocalMountOverDbus(*localBus, localBus->get_unique_name()),
+        "");
+}
+
+TEST_F(InitialStateFixture, GlobalLocalServiceUnmountReturnsFalseWithoutMount)
+{
+    using ::testing::Return;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+
+    EXPECT_FALSE(
+        callLocalUnmountOverDbus(*localBus, localBus->get_unique_name()));
+}
+
+TEST_F(InitialStateFixture,
+       GlobalLocalServiceMountRejectsWhenLocalMountAlreadyActive)
+{
+    using ::testing::Return;
+    using ::testing::ReturnRef;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    using NiceMachine2 =
+        ::testing::NiceMock<interfaces::MockMountPointStateMachine>;
+    NiceMachine2 machine2;
+    Configuration::MountPoint mp2{};
+    std::optional<interfaces::MountPointStateMachine::Target> target2{};
+    int exitCode2{0};
+    boost::asio::io_context ioc2{};
+    std::string name2{"Slot_1"};
+    std::string addInfo2{"occupied"};
+    auto ready2 = std::make_unique<ReadyState>(machine2);
+
+    mp2.mode = Configuration::Mode::local;
+    mp2.nbdDevice = NBDDevice("nbd1");
+    mp2.unixSocket = "/tmp/virtual-media-ut/occupied.socket";
+
+    fs::create_directories("/tmp/lmedia");
+    const std::string occupiedPath = "/tmp/lmedia/already-mounted.iso";
+    {
+        std::ofstream ofs(occupiedPath, std::ios::binary | std::ios::trunc);
+        ofs << "occupied";
+    }
+    target2.emplace();
+    target2->imgUrl = occupiedPath;
+    target2->rw = false;
+
+    ON_CALL(machine2, getState()).WillByDefault(ReturnRef(*ready2));
+    ON_CALL(machine2, getConfig()).WillByDefault(ReturnRef(mp2));
+    ON_CALL(machine2, getTarget()).WillByDefault(ReturnRef(target2));
+    ON_CALL(machine2, getExitCode()).WillByDefault(ReturnRef(exitCode2));
+    ON_CALL(machine2, getIoc()).WillByDefault(ReturnRef(ioc2));
+    ON_CALL(machine2, getName()).WillByDefault(Return(std::string_view{name2}));
+    ON_CALL(machine2, getAdditionalInfo())
+        .WillByDefault(Return(std::string_view{addInfo2}));
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+
+    InitialState::allMountPoints[name2] = &machine2;
+
+    expectSdBusError(
+        [&] {
+            (void)callLocalMountOverDbus(*localBus, localBus->get_unique_name(),
+                                         "/tmp/lmedia/new-request.iso", false);
+        },
+        EBUSY, "Device or resource busy");
+
+    std::error_code ec;
+    fs::remove(occupiedPath, ec);
+}
+
+TEST_F(InitialStateFixture, GlobalLocalServiceMountRejectsWhenNoSlotsAvailable)
+{
+    using ::testing::Return;
+    using ::testing::ReturnRef;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    using NiceMachine2 =
+        ::testing::NiceMock<interfaces::MockMountPointStateMachine>;
+    NiceMachine2 machine2;
+    Configuration::MountPoint mp2{};
+    std::optional<interfaces::MountPointStateMachine::Target> target2{};
+    int exitCode2{0};
+    boost::asio::io_context ioc2{};
+    std::string name2{"Slot_1"};
+    std::string addInfo2{"busy"};
+    auto initial2 = std::make_unique<InitialState>(machine2);
+
+    mp2.mode = Configuration::Mode::local;
+    mp2.nbdDevice = NBDDevice("nbd1");
+    mp2.unixSocket = "/tmp/virtual-media-ut/no-slot.socket";
+
+    ON_CALL(machine2, getState()).WillByDefault(ReturnRef(*initial2));
+    ON_CALL(machine2, getConfig()).WillByDefault(ReturnRef(mp2));
+    ON_CALL(machine2, getTarget()).WillByDefault(ReturnRef(target2));
+    ON_CALL(machine2, getExitCode()).WillByDefault(ReturnRef(exitCode2));
+    ON_CALL(machine2, getIoc()).WillByDefault(ReturnRef(ioc2));
+    ON_CALL(machine2, getName()).WillByDefault(Return(std::string_view{name2}));
+    ON_CALL(machine2, getAdditionalInfo())
+        .WillByDefault(Return(std::string_view{addInfo2}));
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+
+    target.reset();
+    InitialState::allMountPoints["Slot_0"] = &machine2;
+    InitialState::allMountPoints["Slot_1"] = &machine2;
+    InitialState::allMountPoints["Slot_2"] = &machine2;
+    InitialState::allMountPoints["Slot_3"] = &machine2;
+
+    fs::create_directories("/tmp/lmedia");
+    const std::string imagePath = "/tmp/lmedia/no-slots-left.iso";
+    {
+        std::ofstream ofs(imagePath, std::ios::binary | std::ios::trunc);
+        ofs.seekp(0x8001);
+        ofs.write("HD001", 5);
+    }
+
+    expectSdBusError(
+        [&] {
+            (void)callLocalMountOverDbus(*localBus, localBus->get_unique_name(),
+                                         imagePath, false);
+        },
+        EBUSY, "Device or resource busy");
+
+    std::error_code ec;
+    fs::remove(imagePath, ec);
+}
+
+TEST_F(InitialStateFixture,
+       GlobalLocalServiceListAvailableSlotsFiltersBusyAndNonReady)
+{
+    using ::testing::ElementsAre;
+    using ::testing::Return;
+    using ::testing::ReturnRef;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    using NiceMachine2 =
+        ::testing::NiceMock<interfaces::MockMountPointStateMachine>;
+    NiceMachine2 machine1;
+    NiceMachine2 machine2;
+    NiceMachine2 machine3;
+
+    Configuration::MountPoint mp1{}, mp2{}, mp3{};
+    std::optional<interfaces::MountPointStateMachine::Target> target1{};
+    std::optional<interfaces::MountPointStateMachine::Target> target2{};
+    std::optional<interfaces::MountPointStateMachine::Target> target3{};
+    int exitCode1{0}, exitCode2{0}, exitCode3{0};
+    boost::asio::io_context ioc1{}, ioc2{}, ioc3{};
+    std::string name1{"Slot_1"}, name2{"Slot_2"}, name3{"Slot_3"};
+    std::string addInfo1{"busy"}, addInfo2{"not-ready"}, addInfo3{"free"};
+    auto ready1 = std::make_unique<ReadyState>(machine1);
+    auto initial2 = std::make_unique<InitialState>(machine2);
+    auto ready3 = std::make_unique<ReadyState>(machine3);
+
+    fs::create_directories("/tmp/lmedia");
+    const std::string busyPath = "/tmp/lmedia/busy-slot.iso";
+    {
+        std::ofstream ofs(busyPath, std::ios::binary | std::ios::trunc);
+        ofs << "busy";
+    }
+    target1.emplace();
+    target1->imgUrl = busyPath;
+    target1->rw = false;
+
+    mp1.mode = mp2.mode = mp3.mode = Configuration::Mode::local;
+
+    ON_CALL(machine1, getState()).WillByDefault(ReturnRef(*ready1));
+    ON_CALL(machine1, getConfig()).WillByDefault(ReturnRef(mp1));
+    ON_CALL(machine1, getTarget()).WillByDefault(ReturnRef(target1));
+    ON_CALL(machine1, getExitCode()).WillByDefault(ReturnRef(exitCode1));
+    ON_CALL(machine1, getIoc()).WillByDefault(ReturnRef(ioc1));
+    ON_CALL(machine1, getName()).WillByDefault(Return(std::string_view{name1}));
+    ON_CALL(machine1, getAdditionalInfo())
+        .WillByDefault(Return(std::string_view{addInfo1}));
+
+    ON_CALL(machine2, getState()).WillByDefault(ReturnRef(*initial2));
+    ON_CALL(machine2, getConfig()).WillByDefault(ReturnRef(mp2));
+    ON_CALL(machine2, getTarget()).WillByDefault(ReturnRef(target2));
+    ON_CALL(machine2, getExitCode()).WillByDefault(ReturnRef(exitCode2));
+    ON_CALL(machine2, getIoc()).WillByDefault(ReturnRef(ioc2));
+    ON_CALL(machine2, getName()).WillByDefault(Return(std::string_view{name2}));
+    ON_CALL(machine2, getAdditionalInfo())
+        .WillByDefault(Return(std::string_view{addInfo2}));
+
+    ON_CALL(machine3, getState()).WillByDefault(ReturnRef(*ready3));
+    ON_CALL(machine3, getConfig()).WillByDefault(ReturnRef(mp3));
+    ON_CALL(machine3, getTarget()).WillByDefault(ReturnRef(target3));
+    ON_CALL(machine3, getExitCode()).WillByDefault(ReturnRef(exitCode3));
+    ON_CALL(machine3, getIoc()).WillByDefault(ReturnRef(ioc3));
+    ON_CALL(machine3, getName()).WillByDefault(Return(std::string_view{name3}));
+    ON_CALL(machine3, getAdditionalInfo())
+        .WillByDefault(Return(std::string_view{addInfo3}));
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+
+    InitialState::allMountPoints["Slot_1"] = &machine1;
+    InitialState::allMountPoints["Slot_2"] = &machine2;
+    InitialState::allMountPoints["Slot_3"] = &machine3;
+
+    auto slots =
+        callListAvailableSlotsOverDbus(*localBus, localBus->get_unique_name());
+    EXPECT_THAT(slots, ElementsAre("Slot_0", "Slot_3"));
+
+    std::error_code ec;
+    fs::remove(busyPath, ec);
+}
+
+TEST_F(InitialStateFixture, GlobalLocalServiceGetCurrentMountSkipsStaleEntries)
+{
+    using ::testing::Return;
+    using ::testing::ReturnRef;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    using NiceMachine2 =
+        ::testing::NiceMock<interfaces::MockMountPointStateMachine>;
+    NiceMachine2 machine1;
+    NiceMachine2 machine2;
+
+    Configuration::MountPoint mp1{}, mp2{};
+    std::optional<interfaces::MountPointStateMachine::Target> target1{};
+    std::optional<interfaces::MountPointStateMachine::Target> target2{};
+    int exitCode1{0}, exitCode2{0};
+    boost::asio::io_context ioc1{}, ioc2{};
+    std::string name1{"Slot_1"}, name2{"Slot_2"};
+    std::string addInfo1{"stale"}, addInfo2{"valid"};
+    auto ready1 = std::make_unique<ReadyState>(machine1);
+    auto ready2 = std::make_unique<ReadyState>(machine2);
+
+    mp1.mode = mp2.mode = Configuration::Mode::local;
+
+    target1.emplace();
+    target1->imgUrl = "/tmp/lmedia/stale-missing.iso";
+    target1->rw = false;
+
+    fs::create_directories("/tmp/lmedia");
+    const std::string validPath = "/tmp/lmedia/current-valid.iso";
+    {
+        std::ofstream ofs(validPath, std::ios::binary | std::ios::trunc);
+        ofs << "valid";
+    }
+    target2.emplace();
+    target2->imgUrl = validPath;
+    target2->rw = false;
+
+    ON_CALL(machine1, getState()).WillByDefault(ReturnRef(*ready1));
+    ON_CALL(machine1, getConfig()).WillByDefault(ReturnRef(mp1));
+    ON_CALL(machine1, getTarget()).WillByDefault(ReturnRef(target1));
+    ON_CALL(machine1, getExitCode()).WillByDefault(ReturnRef(exitCode1));
+    ON_CALL(machine1, getIoc()).WillByDefault(ReturnRef(ioc1));
+    ON_CALL(machine1, getName()).WillByDefault(Return(std::string_view{name1}));
+    ON_CALL(machine1, getAdditionalInfo())
+        .WillByDefault(Return(std::string_view{addInfo1}));
+
+    ON_CALL(machine2, getState()).WillByDefault(ReturnRef(*ready2));
+    ON_CALL(machine2, getConfig()).WillByDefault(ReturnRef(mp2));
+    ON_CALL(machine2, getTarget()).WillByDefault(ReturnRef(target2));
+    ON_CALL(machine2, getExitCode()).WillByDefault(ReturnRef(exitCode2));
+    ON_CALL(machine2, getIoc()).WillByDefault(ReturnRef(ioc2));
+    ON_CALL(machine2, getName()).WillByDefault(Return(std::string_view{name2}));
+    ON_CALL(machine2, getAdditionalInfo())
+        .WillByDefault(Return(std::string_view{addInfo2}));
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+
+    InitialState::allMountPoints["Slot_1"] = &machine1;
+    InitialState::allMountPoints["Slot_2"] = &machine2;
+
+    EXPECT_EQ(
+        callCurrentLocalMountOverDbus(*localBus, localBus->get_unique_name()),
+        "Slot_2:" + validPath);
+
+    std::error_code ec;
+    fs::remove(validPath, ec);
+}
+
+TEST_F(InitialStateFixture, GlobalLocalServiceUnmountSkipsStaleEntries)
+{
+    using ::testing::Return;
+    using ::testing::ReturnRef;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    using NiceMachine2 =
+        ::testing::NiceMock<interfaces::MockMountPointStateMachine>;
+    NiceMachine2 machine1;
+    NiceMachine2 machine2;
+
+    Configuration::MountPoint mp1{}, mp2{};
+    std::optional<interfaces::MountPointStateMachine::Target> target1{};
+    std::optional<interfaces::MountPointStateMachine::Target> target2{};
+    int exitCode1{0}, exitCode2{0};
+    boost::asio::io_context ioc1{}, ioc2{};
+    std::string name1{"Slot_1"}, name2{"Slot_2"};
+    std::string addInfo1{"stale"}, addInfo2{"valid"};
+    auto ready1 = std::make_unique<ReadyState>(machine1);
+    auto ready2 = std::make_unique<ReadyState>(machine2);
+
+    mp1.mode = mp2.mode = Configuration::Mode::local;
+
+    target1.emplace();
+    target1->imgUrl = "/tmp/lmedia/stale-unmount.iso";
+    target1->rw = false;
+
+    fs::create_directories("/tmp/lmedia");
+    const std::string validPath = "/tmp/lmedia/unmount-valid.iso";
+    {
+        std::ofstream ofs(validPath, std::ios::binary | std::ios::trunc);
+        ofs << "valid";
+    }
+    target2.emplace();
+    target2->imgUrl = validPath;
+    target2->rw = false;
+
+    ON_CALL(machine1, getState()).WillByDefault(ReturnRef(*ready1));
+    ON_CALL(machine1, getConfig()).WillByDefault(ReturnRef(mp1));
+    ON_CALL(machine1, getTarget()).WillByDefault(ReturnRef(target1));
+    ON_CALL(machine1, getExitCode()).WillByDefault(ReturnRef(exitCode1));
+    ON_CALL(machine1, getIoc()).WillByDefault(ReturnRef(ioc1));
+    ON_CALL(machine1, getName()).WillByDefault(Return(std::string_view{name1}));
+    ON_CALL(machine1, getAdditionalInfo())
+        .WillByDefault(Return(std::string_view{addInfo1}));
+
+    ON_CALL(machine2, getState()).WillByDefault(ReturnRef(*ready2));
+    ON_CALL(machine2, getConfig()).WillByDefault(ReturnRef(mp2));
+    ON_CALL(machine2, getTarget()).WillByDefault(ReturnRef(target2));
+    ON_CALL(machine2, getExitCode()).WillByDefault(ReturnRef(exitCode2));
+    ON_CALL(machine2, getIoc()).WillByDefault(ReturnRef(ioc2));
+    ON_CALL(machine2, getName()).WillByDefault(Return(std::string_view{name2}));
+    ON_CALL(machine2, getAdditionalInfo())
+        .WillByDefault(Return(std::string_view{addInfo2}));
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+
+    InitialState::allMountPoints["Slot_1"] = &machine1;
+    InitialState::allMountPoints["Slot_2"] = &machine2;
+
+    EXPECT_CALL(machine2, emitUnmountEvent()).Times(1);
+    EXPECT_TRUE(
+        callLocalUnmountOverDbus(*localBus, localBus->get_unique_name()));
+
+    std::error_code ec;
+    fs::remove(validPath, ec);
+}
+
+TEST_F(InitialStateFixture, MountPointPropertiesExposeConfigAndTargetViaDbus)
+{
+    using StringProperty = std::variant<std::string>;
+    using BoolProperty = std::variant<bool>;
+    using IntProperty = std::variant<int32_t>;
+
+    target.emplace();
+    target->imgUrl = "https://example.com/images/test.iso";
+    target->rw = false;
+    target->credentials = std::make_unique<utils::CredentialsProvider>(
+        std::string("vmuser"), std::string("vmpass"));
+    mp.remainingInactivityTimeout = std::chrono::seconds(37);
+
+    InitialState s{machine};
+    auto next = s.handleEvent(makeRegisterEvent());
+    ASSERT_NE(next, nullptr);
+
+    const std::string path =
+        "/xyz/openbmc_project/VirtualMedia/Proxy/" + std::string(nameStr);
+    const auto service = bus->get_unique_name();
+
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *bus, service, path,
+                  "xyz.openbmc_project.VirtualMedia.MountPoint", "Device")),
+              mp.nbdDevice.to_string());
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *bus, service, path,
+                  "xyz.openbmc_project.VirtualMedia.MountPoint", "Socket")),
+              mp.unixSocket);
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *bus, service, path,
+                  "xyz.openbmc_project.VirtualMedia.MountPoint", "ImageURL")),
+              target->imgUrl);
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *bus, service, path,
+                  "xyz.openbmc_project.VirtualMedia.MountPoint", "UserName")),
+              "vmuser");
+    EXPECT_TRUE(std::get<bool>(getPropertyOverDbus<BoolProperty>(
+        *bus, service, path, "xyz.openbmc_project.VirtualMedia.MountPoint",
+        "WriteProtected")));
+    EXPECT_EQ(
+        std::get<int32_t>(getPropertyOverDbus<IntProperty>(
+            *bus, service, path, "xyz.openbmc_project.VirtualMedia.MountPoint",
+            "RemainingInactivityTimeout")),
+        37);
+}
+
+TEST_F(InitialStateFixture, MountPointPropertyPermissionsEnforcedViaDbus)
+{
+    using StringProperty = std::variant<std::string>;
+    using IntProperty = std::variant<int32_t>;
+
+    InitialState s{machine};
+    auto next = s.handleEvent(makeRegisterEvent());
+    ASSERT_NE(next, nullptr);
+
+    const std::string path =
+        "/xyz/openbmc_project/VirtualMedia/Proxy/" + std::string(nameStr);
+    const auto service = bus->get_unique_name();
+
+    EXPECT_THROW(
+        setPropertyOverDbus(*bus, service, path,
+                            "xyz.openbmc_project.VirtualMedia.MountPoint",
+                            "ImageURL", StringProperty{"changed"}),
+        sdbusplus::exception::SdBusError);
+    EXPECT_THROW(
+        setPropertyOverDbus(*bus, service, path,
+                            "xyz.openbmc_project.VirtualMedia.MountPoint",
+                            "RemainingInactivityTimeout", IntProperty{99}),
+        sdbusplus::exception::SdBusError);
+    EXPECT_NO_THROW(setPropertyOverDbus(
+        *bus, service, path, "xyz.openbmc_project.VirtualMedia.MountPoint",
+        "UserName", StringProperty{"updated-user"}));
+}
+
+TEST_F(InitialStateFixture, ProcessPropertiesReflectCurrentStateViaDbus)
+{
+    using BoolProperty = std::variant<bool>;
+    using IntProperty = std::variant<int32_t>;
+    using ::testing::ReturnRef;
+
+    exitCode = 23;
+    auto activeRef = std::make_unique<ActiveState>(
+        machine, std::unique_ptr<resource::Process>{},
+        std::unique_ptr<resource::Gadget>{});
+    ON_CALL(machine, getState()).WillByDefault(ReturnRef(*activeRef));
+
+    InitialState s{machine};
+    auto next = s.handleEvent(makeRegisterEvent());
+    ASSERT_NE(next, nullptr);
+
+    const std::string path =
+        "/xyz/openbmc_project/VirtualMedia/Proxy/" + std::string(nameStr);
+    const auto service = bus->get_unique_name();
+
+    EXPECT_TRUE(std::get<bool>(getPropertyOverDbus<BoolProperty>(
+        *bus, service, path, "xyz.openbmc_project.VirtualMedia.Process",
+        "Active")));
+    EXPECT_EQ(std::get<int32_t>(getPropertyOverDbus<IntProperty>(
+                  *bus, service, path,
+                  "xyz.openbmc_project.VirtualMedia.Process", "ExitCode")),
+              23);
+}
+
+TEST_F(InitialStateFixture,
+       MountPointAndProcessPropertiesReturnFallbackValuesWithoutTarget)
+{
+    using BoolProperty = std::variant<bool>;
+    using IntProperty = std::variant<int32_t>;
+    using StringProperty = std::variant<std::string>;
+
+    target.reset();
+    InitialState s{machine};
+    auto next = s.handleEvent(makeRegisterEvent());
+    ASSERT_NE(next, nullptr);
+
+    const std::string path =
+        "/xyz/openbmc_project/VirtualMedia/Proxy/" + std::string(nameStr);
+    const auto service = bus->get_unique_name();
+
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *bus, service, path,
+                  "xyz.openbmc_project.VirtualMedia.MountPoint", "ImageURL")),
+              "");
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *bus, service, path,
+                  "xyz.openbmc_project.VirtualMedia.MountPoint", "UserName")),
+              "");
+    EXPECT_TRUE(std::get<bool>(getPropertyOverDbus<BoolProperty>(
+        *bus, service, path, "xyz.openbmc_project.VirtualMedia.MountPoint",
+        "WriteProtected")));
+    EXPECT_FALSE(std::get<bool>(getPropertyOverDbus<BoolProperty>(
+        *bus, service, path, "xyz.openbmc_project.VirtualMedia.Process",
+        "Active")));
+    EXPECT_EQ(std::get<int32_t>(getPropertyOverDbus<IntProperty>(
+                  *bus, service, path,
+                  "xyz.openbmc_project.VirtualMedia.Process", "ExitCode")),
+              0);
+}
+
+TEST_F(InitialStateFixture, ProxyMountViaDbusSetsAdditionalInfoWhenReady)
+{
+    using ::testing::Eq;
+
+    InitialState s{machine};
+    auto next = s.handleEvent(makeRegisterEvent());
+    ASSERT_NE(next, nullptr);
+
+    const std::string path =
+        "/xyz/openbmc_project/VirtualMedia/Proxy/" + std::string(nameStr);
+    const auto service = bus->get_unique_name();
+
+    EXPECT_CALL(machine, setAdditionalInfo("proxy-client-ready")).Times(1);
+    EXPECT_CALL(machine, emitMountEvent(Eq(std::nullopt))).Times(1);
+
+    EXPECT_TRUE(
+        callProxyMountOverDbus(*bus, service, path, "proxy-client-ready"));
+}
+
+TEST_F(InitialStateFixture,
+       ProxyMountViaDbusSkipsAdditionalInfoWhenStateNotReady)
+{
+    using ::testing::Eq;
+    using ::testing::ReturnRef;
+
+    InitialState currentState{machine};
+    ON_CALL(machine, getState()).WillByDefault(ReturnRef(currentState));
+
+    InitialState s{machine};
+    auto next = s.handleEvent(makeRegisterEvent());
+    ASSERT_NE(next, nullptr);
+
+    const std::string path =
+        "/xyz/openbmc_project/VirtualMedia/Proxy/" + std::string(nameStr);
+    const auto service = bus->get_unique_name();
+
+    EXPECT_CALL(machine, setAdditionalInfo(::testing::_)).Times(0);
+    EXPECT_CALL(machine, emitMountEvent(Eq(std::nullopt))).Times(1);
+
+    EXPECT_TRUE(
+        callProxyMountOverDbus(*bus, service, path, "proxy-client-busy"));
+}
+
+TEST_F(InitialStateFixture, LegacyMountViaDbusParsesCredentialsAndMounts)
+{
+#ifdef LEGACY_MODE_ENABLED
+    using ::testing::Truly;
+
+    mp.mode = Configuration::Mode::legacy;
+
+    InitialState s{machine};
+    auto next = s.handleEvent(makeRegisterEvent());
+    ASSERT_NE(next, nullptr);
+
+    const std::string path =
+        "/xyz/openbmc_project/VirtualMedia/Legacy/" + std::string(nameStr);
+    const auto service = bus->get_unique_name();
+    const std::string imageUrl = "https://example.com/legacy.iso";
+
+    int pipeFd[2] = {-1, -1};
+    ASSERT_EQ(::pipe(pipeFd), 0);
+
+    const std::string secretPayload =
+        std::string{"legacy-user"} + '\0' + "legacy-pass" + '\0';
+    ASSERT_EQ(::write(pipeFd[1], secretPayload.data(), secretPayload.size()),
+              static_cast<ssize_t>(secretPayload.size()));
+    ASSERT_EQ(::close(pipeFd[1]), 0);
+    pipeFd[1] = -1;
+
+    EXPECT_CALL(machine, setAdditionalInfo("legacy-client-ready")).Times(1);
+    EXPECT_CALL(
+        machine,
+        emitMountEvent(Truly(
+            [&](const std::optional<interfaces::MountPointStateMachine::Target>&
+                    mountTarget) {
+                return mountTarget && mountTarget->imgUrl == imageUrl &&
+                       mountTarget->rw && mountTarget->credentials &&
+                       mountTarget->credentials->user() == "legacy-user" &&
+                       mountTarget->credentials->password() == "legacy-pass";
+            })))
+        .Times(1);
+
+    EXPECT_TRUE(
+        callLegacyMountOverDbus(ioc, *bus, service, path, imageUrl, true,
+                                pipeFd[0], "legacy-client-ready"));
+    EXPECT_EQ(::close(pipeFd[0]), 0);
+#else
+    GTEST_SKIP()
+        << "LEGACY_MODE_ENABLED not defined; legacy interface disabled.";
+#endif
+}
+
+TEST_F(InitialStateFixture, LegacyMountViaDbusRejectsMalformedSecretPayload)
+{
+#ifdef LEGACY_MODE_ENABLED
+    mp.mode = Configuration::Mode::legacy;
+
+    InitialState s{machine};
+    auto next = s.handleEvent(makeRegisterEvent());
+    ASSERT_NE(next, nullptr);
+
+    const std::string path =
+        "/xyz/openbmc_project/VirtualMedia/Legacy/" + std::string(nameStr);
+    const auto service = bus->get_unique_name();
+
+    int pipeFd[2] = {-1, -1};
+    ASSERT_EQ(::pipe(pipeFd), 0);
+
+    const std::string malformedPayload =
+        std::string{"legacy-user"} + '\0' + "missing-second-null";
+    ASSERT_EQ(::write(pipeFd[1], malformedPayload.data(),
+                      malformedPayload.size()),
+              static_cast<ssize_t>(malformedPayload.size()));
+    ASSERT_EQ(::close(pipeFd[1]), 0);
+    pipeFd[1] = -1;
+
+    EXPECT_CALL(machine, emitMountEvent(::testing::_)).Times(0);
+
+    EXPECT_THROW(callLegacyMountOverDbus(ioc, *bus, service, path,
+                                         "https://example.com/bad-legacy.iso",
+                                         false, pipeFd[0], "legacy-client-bad"),
+                 sdbusplus::exception::SdBusError);
+
+    EXPECT_EQ(::close(pipeFd[0]), 0);
+#else
+    GTEST_SKIP()
+        << "LEGACY_MODE_ENABLED not defined; legacy interface disabled.";
+#endif
+}
+
+TEST_F(InitialStateFixture, LegacyMountViaDbusWithoutSecretFdSkipsCredentials)
+{
+#ifdef LEGACY_MODE_ENABLED
+    using ::testing::Truly;
+
+    mp.mode = Configuration::Mode::legacy;
+
+    InitialState s{machine};
+    auto next = s.handleEvent(makeRegisterEvent());
+    ASSERT_NE(next, nullptr);
+
+    const std::string path =
+        "/xyz/openbmc_project/VirtualMedia/Legacy/" + std::string(nameStr);
+    const auto service = bus->get_unique_name();
+    const std::string imageUrl = "https://example.com/legacy-nofd.iso";
+
+    EXPECT_CALL(machine, setAdditionalInfo("legacy-no-fd")).Times(1);
+    EXPECT_CALL(
+        machine,
+        emitMountEvent(Truly(
+            [&](const std::optional<interfaces::MountPointStateMachine::Target>&
+                    mountTarget) {
+                return mountTarget && mountTarget->imgUrl == imageUrl &&
+                       !mountTarget->rw && !mountTarget->credentials;
+            })))
+        .Times(1);
+
+    EXPECT_TRUE(callLegacyMountOverDbusWithoutSecretFd(
+        ioc, *bus, service, path, imageUrl, false, "legacy-no-fd"));
+#else
+    GTEST_SKIP()
+        << "LEGACY_MODE_ENABLED not defined; legacy interface disabled.";
+#endif
+}
+
+TEST_F(InitialStateFixture,
+       LegacyMountViaDbusSkipsAdditionalInfoWhenStateNotReady)
+{
+#ifdef LEGACY_MODE_ENABLED
+    using ::testing::ReturnRef;
+    using ::testing::Truly;
+
+    mp.mode = Configuration::Mode::legacy;
+
+    InitialState currentState{machine};
+    ON_CALL(machine, getState()).WillByDefault(ReturnRef(currentState));
+
+    InitialState s{machine};
+    auto next = s.handleEvent(makeRegisterEvent());
+    ASSERT_NE(next, nullptr);
+
+    const std::string path =
+        "/xyz/openbmc_project/VirtualMedia/Legacy/" + std::string(nameStr);
+    const auto service = bus->get_unique_name();
+    const std::string imageUrl = "https://example.com/legacy-busy.iso";
+
+    EXPECT_CALL(machine, setAdditionalInfo(::testing::_)).Times(0);
+    EXPECT_CALL(
+        machine,
+        emitMountEvent(Truly(
+            [&](const std::optional<interfaces::MountPointStateMachine::Target>&
+                    mountTarget) {
+                return mountTarget && mountTarget->imgUrl == imageUrl &&
+                       mountTarget->rw && !mountTarget->credentials;
+            })))
+        .Times(1);
+
+    EXPECT_TRUE(callLegacyMountOverDbusWithoutSecretFd(
+        ioc, *bus, service, path, imageUrl, true, "legacy-busy"));
+#else
+    GTEST_SKIP()
+        << "LEGACY_MODE_ENABLED not defined; legacy interface disabled.";
+#endif
+}
+
+TEST_F(InitialStateFixture, ProxyUnmountViaDbusEmitsUnmountEvent)
+{
+    InitialState s{machine};
+    auto next = s.handleEvent(makeRegisterEvent());
+    ASSERT_NE(next, nullptr);
+
+    const std::string path =
+        "/xyz/openbmc_project/VirtualMedia/Proxy/" + std::string(nameStr);
+    const auto service = bus->get_unique_name();
+
+    EXPECT_CALL(machine, emitUnmountEvent()).Times(1);
+
+    EXPECT_TRUE(callProxyUnmountOverDbus(*bus, service, path));
+}
+
+TEST_F(InitialStateFixture,
+       GlobalLocalServiceMountAssignsNextFreeReadySlotAfterOccupiedEntry)
+{
+    using ::testing::Return;
+    using ::testing::ReturnRef;
+    using ::testing::Truly;
+
+    boost::asio::io_context localIo;
+    auto localBus = std::make_shared<sdbusplus::asio::connection>(
+        localIo, sdbusplus::bus::new_bus());
+    auto localObjServer =
+        std::make_shared<sdbusplus::asio::object_server>(localBus);
+
+    InitialState::globalLocalServiceCreated = false;
+    InitialState::globalObjServer.reset();
+    InitialState::allMountPoints.clear();
+
+    nameStr = "Slot_0";
+    ON_CALL(machine, getName())
+        .WillByDefault(Return(std::string_view{nameStr}));
+
+    target.emplace();
+    target->imgUrl = "https://example.com/already-in-use.iso";
+    target->rw = false;
+
+    using NiceMachine2 =
+        ::testing::NiceMock<interfaces::MockMountPointStateMachine>;
+    NiceMachine2 machine1;
+    Configuration::MountPoint mp1{};
+    std::optional<interfaces::MountPointStateMachine::Target> target1{};
+    int exitCode1{0};
+    boost::asio::io_context ioc1{};
+    std::string name1{"Slot_1"};
+    std::string addInfo1{"slot1"};
+    auto ready1 = std::make_unique<ReadyState>(machine1);
+
+    mp1.mode = Configuration::Mode::local;
+    mp1.nbdDevice = NBDDevice("nbd1");
+    mp1.unixSocket = "/tmp/virtual-media-ut/slot1.socket";
+
+    ON_CALL(machine1, getState()).WillByDefault(ReturnRef(*ready1));
+    ON_CALL(machine1, getConfig()).WillByDefault(ReturnRef(mp1));
+    ON_CALL(machine1, getTarget()).WillByDefault(ReturnRef(target1));
+    ON_CALL(machine1, getExitCode()).WillByDefault(ReturnRef(exitCode1));
+    ON_CALL(machine1, getIoc()).WillByDefault(ReturnRef(ioc1));
+    ON_CALL(machine1, getName()).WillByDefault(Return(std::string_view{name1}));
+    ON_CALL(machine1, getAdditionalInfo())
+        .WillByDefault(Return(std::string_view{addInfo1}));
+
+    mp.mode = Configuration::Mode::local;
+    InitialState s{machine};
+    auto next = s.handleEvent(RegisterDbusEvent{localBus, localObjServer});
+    ASSERT_NE(next, nullptr);
+
+    InitialState::allMountPoints[name1] = &machine1;
+
+    fs::create_directories("/tmp/lmedia");
+    const std::string imagePath = "/tmp/lmedia/next-ready-slot.bin";
+    {
+        std::ofstream ofs(imagePath, std::ios::binary | std::ios::trunc);
+        ofs.seekp(0x8001);
+        ofs.write("HD001", 5);
+    }
+
+    EXPECT_CALL(machine1, setAdditionalInfo("LMEDIA")).Times(1);
+    EXPECT_CALL(
+        machine1,
+        emitMountEvent(Truly(
+            [&](const std::optional<interfaces::MountPointStateMachine::Target>&
+                    mountTarget) {
+                return mountTarget && mountTarget->imgUrl == imagePath &&
+                       !mountTarget->rw;
+            })))
+        .Times(1);
+
+    auto slot = callLocalMountOverDbus(*localBus, localBus->get_unique_name(),
+                                       imagePath, false);
+    EXPECT_EQ(slot, "Slot_1");
+
+    std::error_code ec;
+    fs::remove(imagePath, ec);
 }
 
 /**
@@ -716,6 +2294,9 @@ class FakeHandlersFixture : public ::testing::Test
 
     static void SetUpTestSuite()
     {
+        InitialState::allMountPoints.clear();
+        InitialState::globalLocalServiceCreated = false;
+        InitialState::globalObjServer.reset();
         suiteBus = std::make_shared<sdbusplus::asio::connection>(suiteIo);
         suiteObjServer =
             std::make_shared<sdbusplus::asio::object_server>(suiteBus);
@@ -723,6 +2304,9 @@ class FakeHandlersFixture : public ::testing::Test
 
     static void TearDownTestSuite()
     {
+        InitialState::allMountPoints.clear();
+        InitialState::globalLocalServiceCreated = false;
+        InitialState::globalObjServer.reset();
         suiteObjServer.reset();
         suiteBus.reset();
     }
@@ -914,6 +2498,9 @@ class MockedIntegrationFixture : public ::testing::Test
 
     static void SetUpTestSuite()
     {
+        InitialState::allMountPoints.clear();
+        InitialState::globalLocalServiceCreated = false;
+        InitialState::globalObjServer.reset();
         suiteBus = std::make_shared<sdbusplus::asio::connection>(suiteIo);
         suiteObjServer =
             std::make_shared<sdbusplus::asio::object_server>(suiteBus);
@@ -921,6 +2508,9 @@ class MockedIntegrationFixture : public ::testing::Test
 
     static void TearDownTestSuite()
     {
+        InitialState::allMountPoints.clear();
+        InitialState::globalLocalServiceCreated = false;
+        InitialState::globalObjServer.reset();
         suiteObjServer.reset();
         suiteBus.reset();
     }

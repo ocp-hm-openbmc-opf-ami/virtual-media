@@ -558,6 +558,20 @@ TEST(Resources_Gadget, ConfigureSuccess_RecordsArgs_StatusNonNegative)
     EXPECT_EQ(g.getStatus(), 0);
 }
 
+TEST(Resources_Gadget, ConstructedWithInsertedForwardsInsertedStateToConfigure)
+{
+    gadget_recorder::reset();
+    ::testing::NiceMock<MockMachine> m;
+    m.setDefaults();
+    gadget_recorder::ret_for_full = 0;
+
+    resource::Gadget g(m, StateChange::inserted);
+    ASSERT_EQ(gadget_recorder::calls.size(), 1u);
+    EXPECT_EQ(gadget_recorder::calls[0].state,
+              static_cast<int>(StateChange::inserted));
+    EXPECT_EQ(g.getStatus(), 0);
+}
+
 TEST(Resources_Gadget, ConfigureFailure_StatusMinusOne)
 {
     gadget_recorder::reset();

@@ -120,8 +120,10 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <string>
 #include <tuple>
+#include <variant>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -217,6 +219,130 @@ static void writeJsonFile(const fs::path& p, const std::string& text)
     ofs.write(text.c_str(), static_cast<std::streamsize>(text.size()));
     ofs.flush();
     ofs.close();
+}
+
+static std::shared_ptr<sdbusplus::asio::connection> makeTestConnection(
+    boost::asio::io_context& io)
+{
+    return std::make_shared<sdbusplus::asio::connection>(
+        io, sdbusplus::bus::new_bus());
+}
+
+static fs::path makeBlockedConfigDirectory(const char* name)
+{
+    fs::path blocked = fs::temp_directory_path() / name;
+    std::error_code ec;
+    fs::remove_all(blocked, ec);
+    fs::create_directories(blocked, ec);
+    EXPECT_FALSE(ec);
+    return blocked;
+}
+
+template <typename VariantType>
+static VariantType getPropertyOverDbus(
+    sdbusplus::bus_t& serverBus, const std::string& service,
+    const std::string& path, const std::string& interface,
+    const std::string& property)
+{
+    auto future = std::async(
+        std::launch::async,
+        [&service, &path, &interface, &property]() -> VariantType {
+            auto clientBus = sdbusplus::bus::new_bus();
+            auto msg = clientBus.new_method_call(
+                service.c_str(), path.c_str(),
+                "org.freedesktop.DBus.Properties", "Get");
+            msg.append(interface, property);
+
+            auto reply = clientBus.call(msg, std::chrono::seconds(1));
+            VariantType value;
+            reply.read(value);
+            return value;
+        });
+
+    for (int attempt = 0; attempt < 200; ++attempt)
+    {
+        if (future.wait_for(std::chrono::milliseconds(0)) ==
+            std::future_status::ready)
+        {
+            return future.get();
+        }
+        serverBus.wait(std::chrono::milliseconds(5));
+        while (serverBus.process_discard())
+        {}
+    }
+
+    throw std::runtime_error("Timed out waiting for D-Bus property reply");
+}
+
+template <typename VariantType>
+static void setPropertyOverDbus(
+    sdbusplus::bus_t& serverBus, const std::string& service,
+    const std::string& path, const std::string& interface,
+    const std::string& property, VariantType value)
+{
+    auto future = std::async(
+        std::launch::async,
+        [&service, &path, &interface, &property, value = std::move(value)]() {
+            auto clientBus = sdbusplus::bus::new_bus();
+            auto msg = clientBus.new_method_call(
+                service.c_str(), path.c_str(),
+                "org.freedesktop.DBus.Properties", "Set");
+            msg.append(interface, property, value);
+            auto reply = clientBus.call(msg, std::chrono::seconds(1));
+            (void)reply;
+        });
+
+    for (int attempt = 0; attempt < 200; ++attempt)
+    {
+        if (future.wait_for(std::chrono::milliseconds(0)) ==
+            std::future_status::ready)
+        {
+            future.get();
+            return;
+        }
+        serverBus.wait(std::chrono::milliseconds(5));
+        while (serverBus.process_discard())
+        {}
+    }
+
+    throw std::runtime_error("Timed out waiting for D-Bus property set");
+}
+
+template <typename ReplyType, typename... Args>
+static ReplyType callMethodOverDbus(
+    sdbusplus::bus_t& serverBus, const std::string& service,
+    const std::string& path, const std::string& interface,
+    const std::string& method, Args&&... args)
+{
+    auto future = std::async(
+        std::launch::async,
+        [&service, &path, &interface, &method,
+         ... args = std::forward<Args>(args)]() mutable -> ReplyType {
+            auto clientBus = sdbusplus::bus::new_bus();
+            auto msg =
+                clientBus.new_method_call(service.c_str(), path.c_str(),
+                                          interface.c_str(), method.c_str());
+            msg.append(std::move(args)...);
+
+            auto reply = clientBus.call(msg, std::chrono::seconds(1));
+            ReplyType value;
+            reply.read(value);
+            return value;
+        });
+
+    for (int attempt = 0; attempt < 200; ++attempt)
+    {
+        if (future.wait_for(std::chrono::milliseconds(0)) ==
+            std::future_status::ready)
+        {
+            return future.get();
+        }
+        serverBus.wait(std::chrono::milliseconds(5));
+        while (serverBus.process_discard())
+        {}
+    }
+
+    throw std::runtime_error("Timed out waiting for D-Bus method reply");
 }
 
 static std::string slurp(const fs::path& p)
@@ -419,7 +545,7 @@ TEST_F(VMInterfaceDbusFixture,
        AddInterfacesRegistersAndSetAllSucceedsWithInterfacePresent)
 {
     boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+    auto conn = makeTestConnection(io);
     auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
 
     vm::Interface ifc{srv, std::string(vm::vmObjPath),
@@ -439,12 +565,53 @@ TEST_F(VMInterfaceDbusFixture,
     EXPECT_TRUE(content.find("\"RetryInterval\": 20") != std::string::npos);
 }
 
+TEST_F(VMInterfaceDbusFixture, SetAllMethodOverDbusInvokesRegisteredLambda)
+{
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    const auto status = callMethodOverDbus<std::string>(
+        *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+        vm::RmediaInterface, "SetAll", 4u, 20u);
+
+    EXPECT_EQ(status, "Success");
+    EXPECT_EQ(ifc.GetAll(), std::make_tuple(4u, 20u));
+
+    const auto content = slurp(cfgPath());
+    EXPECT_TRUE(content.find("\"RetryCount\": 4") != std::string::npos);
+    EXPECT_TRUE(content.find("\"RetryInterval\": 20") != std::string::npos);
+}
+
+TEST_F(VMInterfaceDbusFixture, GetAllMethodOverDbusReturnsRegisteredValues)
+{
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+    ASSERT_EQ(ifc.SetAll(5u, 25u), "Success");
+
+    const auto values =
+        callMethodOverDbus<std::tuple<unsigned int, unsigned int>>(
+            *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+            vm::RmediaInterface, "GetAll");
+
+    EXPECT_EQ(values, std::make_tuple(5u, 25u));
+}
+
 // ImageURL initial create: interface initialized.
 TEST_F(VMInterfaceDbusFixture,
        ImageURLInitialCreateRegistersSlotPropertiesFromJson)
 {
     boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+    auto conn = makeTestConnection(io);
     auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
 
     vm::Interface ifc{srv, std::string(vm::vmObjPath),
@@ -458,7 +625,7 @@ TEST_F(VMInterfaceDbusFixture,
 TEST_F(VMInterfaceDbusFixture, SaveImageURLPersistsAndRefreshesSlotProperty)
 {
     boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+    auto conn = makeTestConnection(io);
     auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
 
     vm::Interface ifc{srv, std::string(vm::vmObjPath),
@@ -502,7 +669,7 @@ TEST_F(VMInterfaceDbusFixture,
 {
     // Create a valid interface first
     boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+    auto conn = makeTestConnection(io);
     auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
     vm::Interface ifc{srv, std::string(vm::vmObjPath),
                       VIRTUAL_MEDIA_CONFIG_PATH};
@@ -520,22 +687,24 @@ TEST_F(VMInterfaceDbusFixture,
 
 // Write-error branch in SetAll(): make file read-only so ofstream open fails;
 // status remains "Success".
-TEST_F(VMInterfaceDbusFixture, SetAllLogsErrorOnWriteFailureButUpdatesState)
+TEST_F(VMInterfaceDbusFixture,
+       SetAll_ConfigPathBecomesDirectory_UpdatesRuntimeState)
 {
     // Valid seed
     const std::string seed = R"({"RetryCount": 3, "RetryInterval": 15})";
     writeJsonFile(cfgPath(), seed);
 
-    // Read-only file (write will fail)
-    ASSERT_EQ(::chmod(cfgPath().c_str(), 0444), 0)
-        << "chmod to read-only failed";
-
     boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+    auto conn = makeTestConnection(io);
     auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
     vm::Interface ifc{srv, std::string(vm::vmObjPath),
                       VIRTUAL_MEDIA_CONFIG_PATH};
     ifc.addInterfaces();
+
+    const fs::path blocked =
+        makeBlockedConfigDirectory("vm-interface-setall-blocked");
+    ifc.vmConfigPath = blocked.string();
+    vm::Interface::instance->vmConfigPath = blocked.string();
 
     EXPECT_EQ(ifc.SetAll(4u, 20u), std::string("Success"));
 
@@ -543,8 +712,12 @@ TEST_F(VMInterfaceDbusFixture, SetAllLogsErrorOnWriteFailureButUpdatesState)
     EXPECT_EQ(rc, 4u);
     EXPECT_EQ(ri, 20u);
 
-    // Reset permissions for hygiene
-    (void)::chmod(cfgPath().c_str(), 0644);
+    auto content = slurp(cfgPath());
+    EXPECT_THAT(content, HasSubstr("\"RetryCount\": 3"));
+    EXPECT_THAT(content, HasSubstr("\"RetryInterval\": 15"));
+
+    std::error_code ec;
+    fs::remove_all(blocked, ec);
 }
 
 // Unsupported slot path in saveImageURLToJson(): no write-back, no refresh.
@@ -558,7 +731,7 @@ TEST_F(VMInterfaceDbusFixture,
     writeJsonFile(cfgPath(), seed);
 
     boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+    auto conn = makeTestConnection(io);
     auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
     vm::Interface ifc{srv, std::string(vm::vmObjPath),
                       VIRTUAL_MEDIA_CONFIG_PATH};
@@ -582,7 +755,7 @@ TEST_F(VMInterfaceDbusFixture, SaveImageURLSlotMissingInJsonNoWriteBack)
     writeJsonFile(cfgPath(), seed);
 
     boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+    auto conn = makeTestConnection(io);
     auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
     vm::Interface ifc{srv, std::string(vm::vmObjPath),
                       VIRTUAL_MEDIA_CONFIG_PATH};
@@ -595,6 +768,28 @@ TEST_F(VMInterfaceDbusFixture, SaveImageURLSlotMissingInJsonNoWriteBack)
     EXPECT_TRUE(after.find("https://miss.example/2.iso") == std::string::npos);
 }
 
+TEST_F(VMInterfaceDbusFixture,
+       SaveImageURLMalformedJsonDoesNotRewriteUsingStaleState)
+{
+    const std::string malformed = R"({"RetryCount": 3)";
+    writeJsonFile(cfgPath(), malformed);
+
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    vm::Interface::saveImageURLToJson("https://stale.example/slot2.iso",
+                                      "Slot_2");
+
+    const auto after = slurp(cfgPath());
+    EXPECT_EQ(after, malformed);
+    EXPECT_TRUE(after.find("https://stale.example/slot2.iso") ==
+                std::string::npos);
+}
+
 // --- SetAll(): write occurs when *either* value differs (matches
 // implementation) ---
 TEST_F(VMInterfaceDbusFixture, SetAllWriteBackOnSingleValueDifference)
@@ -605,7 +800,7 @@ TEST_F(VMInterfaceDbusFixture, SetAllWriteBackOnSingleValueDifference)
 
     // D-Bus present
     boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+    auto conn = makeTestConnection(io);
     auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
     vm::Interface ifc{srv, std::string(vm::vmObjPath),
                       VIRTUAL_MEDIA_CONFIG_PATH};
@@ -657,7 +852,7 @@ TEST_F(VMInterfaceDbusFixture, LoadImageURLFromJsonLoadsAndRefreshes)
 
     // D-Bus setup
     boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+    auto conn = makeTestConnection(io);
     auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
 
     vm::Interface ifc{srv, std::string(vm::vmObjPath),
@@ -707,7 +902,7 @@ TEST_F(VMInterfaceDbusFixture, LoadImageURLFromJsonMissingBackupImageURLHandled)
     (void)vm::Interface::loadJson();
 
     boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+    auto conn = makeTestConnection(io);
     auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
 
     vm::Interface ifc{srv, std::string(vm::vmObjPath),
@@ -721,6 +916,231 @@ TEST_F(VMInterfaceDbusFixture, LoadImageURLFromJsonMissingBackupImageURLHandled)
     // File remains without the key.
     auto after = slurp(cfgPath());
     EXPECT_TRUE(after.find("\"BackupImageURL\"") == std::string::npos);
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture,
+       LoadImageURLFromJsonOnlySlot2PresentLeavesSlot3Empty)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    const std::string seed = R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {
+            "Slot_2": { "ImageURL": "https://example.com/slot2-only.iso" }
+        }
+    })";
+    writeJsonFile(cfgPath(), seed);
+    (void)vm::Interface::loadJson();
+
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    using StringProperty = std::variant<std::string>;
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                  vm::RmediaImageURLInterface, "Slot_2")),
+              "https://example.com/slot2-only.iso");
+    EXPECT_TRUE(
+        std::get<std::string>(
+            getPropertyOverDbus<StringProperty>(
+                *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                vm::RmediaImageURLInterface, "Slot_3"))
+            .empty());
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture,
+       LoadImageURLFromJsonOnlySlot3PresentLeavesSlot2Empty)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    const std::string seed = R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {
+            "Slot_3": { "ImageURL": "https://example.com/slot3-only.iso" }
+        }
+    })";
+    writeJsonFile(cfgPath(), seed);
+    (void)vm::Interface::loadJson();
+
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    using StringProperty = std::variant<std::string>;
+    EXPECT_TRUE(
+        std::get<std::string>(
+            getPropertyOverDbus<StringProperty>(
+                *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                vm::RmediaImageURLInterface, "Slot_2"))
+            .empty());
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                  vm::RmediaImageURLInterface, "Slot_3")),
+              "https://example.com/slot3-only.iso");
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture,
+       LoadImageURLFromJsonMissingImageUrlInSlotLeavesPropertyEmpty)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    const std::string seed = R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {
+            "Slot_2": { "WrongKey": "https://example.com/ignored.iso" },
+            "Slot_3": { "ImageURL": "https://example.com/slot3-valid.iso" }
+        }
+    })";
+    writeJsonFile(cfgPath(), seed);
+    (void)vm::Interface::loadJson();
+
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    using StringProperty = std::variant<std::string>;
+    EXPECT_TRUE(
+        std::get<std::string>(
+            getPropertyOverDbus<StringProperty>(
+                *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                vm::RmediaImageURLInterface, "Slot_2"))
+            .empty());
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                  vm::RmediaImageURLInterface, "Slot_3")),
+              "https://example.com/slot3-valid.iso");
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture, LoadImageURLFromJsonRejectsNonStringImageUrl)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    const std::string seed = R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {
+            "Slot_2": { "ImageURL": 42 },
+            "Slot_3": { "ImageURL": "https://example.com/slot3-valid.iso" }
+        }
+    })";
+    writeJsonFile(cfgPath(), seed);
+    (void)vm::Interface::loadJson();
+
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+
+    EXPECT_THROW(ifc.loadImageURLFromJson(), json::type_error);
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture,
+       LoadImageURLFromJsonMalformedDoesNotClearExistingProperties)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    const std::string seed = R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {
+            "Slot_2": { "ImageURL": "https://example.com/still-valid.iso" },
+            "Slot_3": { "ImageURL": "https://example.com/slot3-valid.iso" }
+        }
+    })";
+    writeJsonFile(cfgPath(), seed);
+
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    // Corrupt the file after the interface has already loaded valid data.
+    writeJsonFile(cfgPath(), R"({"RetryCount": 3)");
+
+    EXPECT_NO_THROW(ifc.loadImageURLFromJson());
+
+    using StringProperty = std::variant<std::string>;
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                  vm::RmediaImageURLInterface, "Slot_2")),
+              "https://example.com/still-valid.iso");
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture, LoadImageURLFromJsonRefreshesExistingProperties)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    const std::string seed = R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {
+            "Slot_2": { "ImageURL": "https://example.com/original-2.iso" },
+            "Slot_3": { "ImageURL": "https://example.com/original-3.iso" }
+        }
+    })";
+    writeJsonFile(cfgPath(), seed);
+
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    writeJsonFile(cfgPath(), R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {
+            "Slot_2": { "ImageURL": "https://example.com/updated-2.iso" },
+            "Slot_3": { "ImageURL": "https://example.com/updated-3.iso" }
+        }
+    })");
+
+    ifc.loadImageURLFromJson();
+
+    using StringProperty = std::variant<std::string>;
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                  vm::RmediaImageURLInterface, "Slot_2")),
+              "https://example.com/updated-2.iso");
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                  vm::RmediaImageURLInterface, "Slot_3")),
+              "https://example.com/updated-3.iso");
 #else
     GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
 #endif
@@ -740,7 +1160,7 @@ TEST_F(VMInterfaceDbusFixture, SetAllWriteBackOnRetryCountDifference)
 
     // D-Bus present
     boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+    auto conn = makeTestConnection(io);
     auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
     vm::Interface ifc{srv, std::string(vm::vmObjPath),
                       VIRTUAL_MEDIA_CONFIG_PATH};
@@ -766,7 +1186,8 @@ TEST_F(VMInterfaceDbusFixture, SetAllWriteBackOnRetryCountDifference)
  */
 // SaveImageURLToJson: write failure must not change file; requires a valid
 // Interface instance
-TEST_F(VMInterfaceDbusFixture, SaveImageURLToJsonWriteFailureDoesNotChangeFile)
+TEST_F(VMInterfaceDbusFixture,
+       SaveImageURLToJson_LoadJsonFailure_LeavesOriginalFileUnchanged)
 {
 #ifdef VIRTUAL_MEDIA_CONFIG_PATH
     // Seed a valid JSON with Slot_2
@@ -779,20 +1200,22 @@ TEST_F(VMInterfaceDbusFixture, SaveImageURLToJsonWriteFailureDoesNotChangeFile)
     })";
     writeJsonFile(cfgPath(), seed);
 
-    // Make the config file read-only so write will fail
-    ASSERT_EQ(::chmod(cfgPath().c_str(), 0444), 0)
-        << "chmod to read-only failed";
-
     // Create a valid Interface and register D-Bus interfaces so
     // vm::Interface::instance is non-null
     boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+    auto conn = makeTestConnection(io);
     auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
     vm::Interface ifc{srv, std::string(vm::vmObjPath),
                       VIRTUAL_MEDIA_CONFIG_PATH};
     ifc.addInterfaces();
 
-    // Attempt to update Slot_2; implementation should catch the write error
+    const fs::path blocked =
+        makeBlockedConfigDirectory("vm-interface-save-blocked");
+    ifc.vmConfigPath = blocked.string();
+    vm::Interface::instance->vmConfigPath = blocked.string();
+
+    // Attempt to update Slot_2 with an invalid config path; implementation
+    // should leave the original file unchanged.
     vm::Interface::saveImageURLToJson("https://blocked.example/slot2.iso",
                                       "Slot_2");
 
@@ -803,8 +1226,335 @@ TEST_F(VMInterfaceDbusFixture, SaveImageURLToJsonWriteFailureDoesNotChangeFile)
     EXPECT_TRUE(after.find("\"https://example.com/slot2.iso\"") !=
                 std::string::npos);
 
-    // Restore permissions for hygiene
-    (void)::chmod(cfgPath().c_str(), 0644);
+    std::error_code ec;
+    fs::remove_all(blocked, ec);
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST(VMInterfaceBasics, ConstructorReplacesStaticInstanceWithMostRecentObject)
+{
+    std::shared_ptr<sdbusplus::asio::object_server> nullServer;
+
+    vm::Interface first{nullServer, "/xyz/openbmc_project/VirtualMedia/First",
+                        "/tmp/vm-first.json"};
+    EXPECT_EQ(vm::Interface::instance, &first);
+
+    vm::Interface second{nullServer, "/xyz/openbmc_project/VirtualMedia/Second",
+                         "/tmp/vm-second.json"};
+    EXPECT_EQ(vm::Interface::instance, &second);
+    EXPECT_EQ(second.vmObjPath, "/xyz/openbmc_project/VirtualMedia/Second");
+    EXPECT_EQ(second.vmConfigPath, "/tmp/vm-second.json");
+}
+
+TEST_F(VMInterfaceDbusFixture, AddInterfacesPublishesRetryPropertiesFromJson)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    writeJsonFile(cfgPath(), R"({
+        "RetryCount": 6,
+        "RetryInterval": 30,
+        "BackupImageURL": {
+            "Slot_2": { "ImageURL": "https://example.com/slot2.iso" },
+            "Slot_3": { "ImageURL": "https://example.com/slot3.iso" }
+        }
+    })");
+    (void)vm::Interface::loadJson();
+
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    using UnsignedProperty = std::variant<unsigned int>;
+    EXPECT_EQ(std::get<unsigned int>(getPropertyOverDbus<UnsignedProperty>(
+                  *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                  vm::RmediaInterface, "RetryCount")),
+              6u);
+    EXPECT_EQ(std::get<unsigned int>(getPropertyOverDbus<UnsignedProperty>(
+                  *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                  vm::RmediaInterface, "RetryInterval")),
+              30u);
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture, SetAllMethodOverDbusRejectsLowOutOfRangeValues)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    const auto status = callMethodOverDbus<std::string>(
+        *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+        vm::RmediaInterface, "SetAll", 2u, 14u);
+
+    EXPECT_THAT(status, HasSubstr("Error:"));
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture, SetAllMethodOverDbusRejectsHighOutOfRangeValues)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    const auto status = callMethodOverDbus<std::string>(
+        *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+        vm::RmediaInterface, "SetAll", 7u, 31u);
+
+    EXPECT_THAT(status, HasSubstr("Error:"));
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture,
+       SaveImageURLToJsonUpdatesOnlySlot3AndPreservesSlot2)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    writeJsonFile(cfgPath(), R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {
+            "Slot_2": { "ImageURL": "https://example.com/original-2.iso" },
+            "Slot_3": { "ImageURL": "https://example.com/original-3.iso" }
+        }
+    })");
+    (void)vm::Interface::loadJson();
+
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    vm::Interface::saveImageURLToJson("https://example.com/updated-3.iso",
+                                      "Slot_3");
+
+    auto content = slurp(cfgPath());
+    EXPECT_THAT(content, HasSubstr("https://example.com/original-2.iso"));
+    EXPECT_THAT(content, HasSubstr("https://example.com/updated-3.iso"));
+
+    using StringProperty = std::variant<std::string>;
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                  vm::RmediaImageURLInterface, "Slot_2")),
+              "https://example.com/original-2.iso");
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                  vm::RmediaImageURLInterface, "Slot_3")),
+              "https://example.com/updated-3.iso");
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture,
+       LoadImageURLFromJsonRefreshClearsSlot2WhenMissingFromJson)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    writeJsonFile(cfgPath(), R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {
+            "Slot_2": { "ImageURL": "https://example.com/original-2.iso" },
+            "Slot_3": { "ImageURL": "https://example.com/original-3.iso" }
+        }
+    })");
+
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    writeJsonFile(cfgPath(), R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {
+            "Slot_3": { "ImageURL": "https://example.com/only-3.iso" }
+        }
+    })");
+
+    ifc.loadImageURLFromJson();
+
+    using StringProperty = std::variant<std::string>;
+    EXPECT_TRUE(
+        std::get<std::string>(
+            getPropertyOverDbus<StringProperty>(
+                *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                vm::RmediaImageURLInterface, "Slot_2"))
+            .empty());
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                  vm::RmediaImageURLInterface, "Slot_3")),
+              "https://example.com/only-3.iso");
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture,
+       LoadImageURLFromJsonRefreshClearsSlot3WhenMissingFromJson)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    writeJsonFile(cfgPath(), R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {
+            "Slot_2": { "ImageURL": "https://example.com/original-2.iso" },
+            "Slot_3": { "ImageURL": "https://example.com/original-3.iso" }
+        }
+    })");
+
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    writeJsonFile(cfgPath(), R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {
+            "Slot_2": { "ImageURL": "https://example.com/only-2.iso" }
+        }
+    })");
+
+    ifc.loadImageURLFromJson();
+
+    using StringProperty = std::variant<std::string>;
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                  vm::RmediaImageURLInterface, "Slot_2")),
+              "https://example.com/only-2.iso");
+    EXPECT_TRUE(
+        std::get<std::string>(
+            getPropertyOverDbus<StringProperty>(
+                *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                vm::RmediaImageURLInterface, "Slot_3"))
+            .empty());
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture,
+       LoadImageURLFromJsonRefreshClearsBothSlotsWhenBackupImageUrlEmpty)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    writeJsonFile(cfgPath(), R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {
+            "Slot_2": { "ImageURL": "https://example.com/original-2.iso" },
+            "Slot_3": { "ImageURL": "https://example.com/original-3.iso" }
+        }
+    })");
+
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    writeJsonFile(cfgPath(), R"({
+        "RetryCount": 3,
+        "RetryInterval": 15,
+        "BackupImageURL": {}
+    })");
+
+    ifc.loadImageURLFromJson();
+
+    using StringProperty = std::variant<std::string>;
+    EXPECT_TRUE(
+        std::get<std::string>(
+            getPropertyOverDbus<StringProperty>(
+                *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                vm::RmediaImageURLInterface, "Slot_2"))
+            .empty());
+    EXPECT_TRUE(
+        std::get<std::string>(
+            getPropertyOverDbus<StringProperty>(
+                *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                vm::RmediaImageURLInterface, "Slot_3"))
+            .empty());
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture, RetryPropertiesRejectExternalDbusSetAttempts)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    using UIntProperty = std::variant<unsigned int>;
+    EXPECT_THROW(setPropertyOverDbus<UIntProperty>(
+                     *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                     vm::RmediaInterface, "RetryCount", UIntProperty{5u}),
+                 sdbusplus::exception::SdBusError);
+    EXPECT_THROW(setPropertyOverDbus<UIntProperty>(
+                     *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                     vm::RmediaInterface, "RetryInterval", UIntProperty{20u}),
+                 sdbusplus::exception::SdBusError);
+
+    // Values must be unchanged since the Set attempts were rejected.
+    auto [rc, ri] = ifc.GetAll();
+    EXPECT_EQ(rc, 3u);
+    EXPECT_EQ(ri, 15u);
+#else
+    GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
+#endif
+}
+
+TEST_F(VMInterfaceDbusFixture, ImageURLPropertiesRejectExternalDbusSetAttempts)
+{
+#ifdef VIRTUAL_MEDIA_CONFIG_PATH
+    boost::asio::io_context io;
+    auto conn = makeTestConnection(io);
+    auto srv = std::make_shared<sdbusplus::asio::object_server>(conn);
+    vm::Interface ifc{srv, std::string(vm::vmObjPath),
+                      VIRTUAL_MEDIA_CONFIG_PATH};
+    ifc.addInterfaces();
+
+    using StringProperty = std::variant<std::string>;
+    EXPECT_THROW(
+        setPropertyOverDbus<StringProperty>(
+            *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+            vm::RmediaImageURLInterface, "Slot_2",
+            StringProperty{std::string("https://attacker.example/evil.iso")}),
+        sdbusplus::exception::SdBusError);
+
+    EXPECT_EQ(std::get<std::string>(getPropertyOverDbus<StringProperty>(
+                  *conn, conn->get_unique_name(), std::string(vm::vmObjPath),
+                  vm::RmediaImageURLInterface, "Slot_2")),
+              "https://example.com/slot2.iso");
 #else
     GTEST_SKIP() << "VIRTUAL_MEDIA_CONFIG_PATH not defined in test TU";
 #endif

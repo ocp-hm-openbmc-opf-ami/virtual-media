@@ -98,7 +98,11 @@
 #include <gtest/gtest.h>
 // NOTE: Do not include state/initial_state.hpp directly; state_machine.hpp
 // includes it.
+// Expose InitialState's private static bookkeeping so suite teardown can
+// reset it (see initial_state_test.cpp for the same pattern/rationale).
+#define private public
 #include "state_machine.hpp" // Under test
+#undef private
 
 class StateMachineFixture : public ::testing::Test
 {
@@ -116,12 +120,18 @@ class StateMachineFixture : public ::testing::Test
 
     static void SetUpTestSuite()
     {
+        InitialState::allMountPoints.clear();
+        InitialState::globalLocalServiceCreated = false;
+        InitialState::globalObjServer.reset();
         suiteBus = std::make_shared<sdbusplus::asio::connection>(suiteIo);
         suiteObjServer =
             std::make_shared<sdbusplus::asio::object_server>(suiteBus);
     }
     static void TearDownTestSuite()
     {
+        InitialState::allMountPoints.clear();
+        InitialState::globalLocalServiceCreated = false;
+        InitialState::globalObjServer.reset();
         suiteObjServer.reset();
         suiteBus.reset();
     }

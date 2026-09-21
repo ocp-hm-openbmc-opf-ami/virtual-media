@@ -136,6 +136,45 @@ static void writeAt(const fs::path& p, std::streamoff off, const std::string& s)
     f.close();
 }
 
+static bool pumpBusUntil(sdbusplus::bus_t& bus,
+                         const std::function<bool()>& done, int attempts = 200)
+{
+    for (int attempt = 0; attempt < attempts; ++attempt)
+    {
+        if (done())
+        {
+            return true;
+        }
+        bus.wait(std::chrono::milliseconds(5));
+        while (bus.process_discard())
+        {}
+    }
+    return done();
+}
+
+static void pumpBus(sdbusplus::bus_t& bus, int attempts = 40)
+{
+    for (int attempt = 0; attempt < attempts; ++attempt)
+    {
+        bus.wait(std::chrono::milliseconds(5));
+        while (bus.process_discard())
+        {}
+    }
+}
+
+static void emitSessionPropertiesChanged(
+    const std::string& interfaceName,
+    const boost::container::flat_map<std::string, vmediaPropertyVariant>&
+        sessionProperty)
+{
+    auto clientBus = sdbusplus::bus::new_bus();
+    auto signal =
+        clientBus.new_signal(sessMgrVmediaObjPath.c_str(),
+                             DBUS_PROPERTIES_INTERFACE, "PropertiesChanged");
+    signal.append(interfaceName, sessionProperty, std::vector<std::string>{});
+    signal.signal_send();
+}
+
 //=============================================================================
 // Path and Slot Number Parsing Tests
 //=============================================================================
@@ -237,6 +276,73 @@ TEST(SessionId, ExtractSessionIdInvalidFormat)
 TEST(SessionId, ExtractSessionIdOutOfRange)
 {
     EXPECT_THROW(extractSessionId("session_99999"), std::out_of_range);
+}
+
+TEST(NBDDeviceHelpers, UnknownAndNamedDeviceConversions)
+{
+    NBDDevice unknownDevice;
+    NBDDevice invalidDevice("not-a-real-nbd");
+    NBDDevice namedDevice("nbd2");
+
+    EXPECT_FALSE(static_cast<bool>(unknownDevice));
+    EXPECT_FALSE(static_cast<bool>(invalidDevice));
+    EXPECT_TRUE(static_cast<bool>(namedDevice));
+
+    EXPECT_FALSE(unknownDevice.isReady());
+    EXPECT_FALSE(invalidDevice.isReady());
+
+    EXPECT_EQ(unknownDevice.to_string(), "");
+    EXPECT_EQ(invalidDevice.to_string(), "");
+    EXPECT_EQ(namedDevice.to_string(), "nbd2");
+
+    EXPECT_TRUE(unknownDevice.to_path().empty());
+    EXPECT_TRUE(invalidDevice.to_path().empty());
+    EXPECT_EQ(namedDevice.to_path(), fs::path("/dev/nbd2"));
+
+    EXPECT_EQ(unknownDevice, invalidDevice);
+    EXPECT_NE(unknownDevice, namedDevice);
+}
+
+TEST(NBDDeviceHelpers, DisconnectUnknownAndMissingDeviceDoNotThrow)
+{
+    NBDDevice unknownDevice;
+    NBDDevice missingDevice("nbd10");
+
+    EXPECT_NO_THROW(unknownDevice.disconnect());
+    EXPECT_NO_THROW(missingDevice.disconnect());
+}
+
+TEST(GlobalContextHelpers, IsSamePathReturnsZeroWhenCredentialsMissing)
+{
+    creds[0].reset();
+    creds[1].reset();
+
+    EXPECT_EQ(isSamePath(), 0);
+
+    boost::asio::io_context ioc;
+    creds[0] = std::make_shared<Credentials>(ioc, "/tmp/slot2/image.iso");
+
+    EXPECT_EQ(isSamePath(), 0);
+
+    creds[0].reset();
+    creds[1].reset();
+}
+
+TEST(DbusMonitorHelpers, HandleSessionsLeavesActiveMapWhenNothingRemoved)
+{
+    DbusMonitor monitor;
+    activeSessons.clear();
+    activeSessons["Slot_2"] = 8;
+
+    sessionList updatedSessions{{8, "10.0.0.1", "user", VMEDIA,
+                                 PRIV_LEVEL_ADMIN, 1, "mount", "Slot_2"}};
+
+    monitor.handleSessions(updatedSessions);
+
+    ASSERT_EQ(activeSessons.size(), 1U);
+    EXPECT_EQ(activeSessons["Slot_2"], 8);
+
+    activeSessons.clear();
 }
 
 //=============================================================================
@@ -401,6 +507,14 @@ TEST(NBDDevice, ConstructorsAndConversion)
     EXPECT_NE(devByName, unknown);
     EXPECT_LT(NBDDevice(NBDDevice::nbd2), NBDDevice(NBDDevice::nbd9));
 }
+
+TEST(NBDDevice, NullptrConstructorLeavesUnknown)
+{
+    NBDDevice nullName(static_cast<const char*>(nullptr));
+    EXPECT_FALSE(static_cast<bool>(nullName));
+    EXPECT_EQ(nullName.to_string(), "");
+    EXPECT_EQ(nullName.to_path(), fs::path());
+}
 TEST(DbMonitorHelpers, FindKeyForValue)
 {
     activesessionmap m;
@@ -443,9 +557,11 @@ TEST(RetryMount, InvalidSlotNumberEarlyExit)
 TEST(SleepMs, SleepsApproximately)
 {
     using namespace std::chrono;
+
     auto start = steady_clock::now();
     sleep_ms(50);
     auto dur = duration_cast<milliseconds>(steady_clock::now() - start).count();
+
     EXPECT_GE(dur, 40);
 }
 TEST(SlotNumber, ExtractSlotNumberEdgeCases)
@@ -519,13 +635,27 @@ TEST(FileAccess, DirectoryAndSymlinkCases)
     EXPECT_FALSE(isFileAccessible(broken.string()));
     fs::remove(broken);
 }
-TEST(PathHelpers, EndsWithDelimiterAndRoot)
+TEST(PathHelpers, RootAndDelimiterVariants)
 {
     EXPECT_EQ(getPathWithoutFileName("/abc/def/"), "/abc/def/");
     EXPECT_EQ(getPathWithoutFileName("C\\\\abc\\\\def\\\\"),
               "C\\\\abc\\\\def\\\\");
     EXPECT_EQ(getPathWithoutFileName("/"), "/");
     EXPECT_EQ(getPathWithoutFileName("C\\\\"), "C\\\\");
+}
+
+TEST(GlobalContextHelpers, MountPrefixAndServiceBasePath)
+{
+    EXPECT_EQ(getMountDirPrefix(), "/tmp/");
+
+    auto [serviceName, basePath] = getServiceAndBasePath("Slot_0");
+    EXPECT_EQ(serviceName, g_serviceName);
+    EXPECT_EQ(basePath, g_basePath);
+}
+
+TEST(DBusHelpers, EventLogSupportNoThrowWithoutService)
+{
+    EXPECT_NO_THROW(eventLogSupport("OpenBMC.0.1.MediaMount"));
 }
 
 // ---------------- Additional tests (no src modification) ----------------
@@ -539,6 +669,26 @@ TEST(RetryMount, ExhaustsAttemptsAndNullifiesCreds)
     // No retries -> loop is skipped, function should nullify creds[1]
     EXPECT_FALSE(retryMount("Slot_3", 0U, 0U));
     EXPECT_EQ(creds[1], nullptr);
+}
+
+TEST(RetryMount, SingleRetrySmbPathCatchesDbusErrorAndNullifiesCreds)
+{
+    boost::asio::io_context io;
+    creds[1] = std::make_shared<Credentials>(io, "smb://server/share/bar.img",
+                                             false, "session_34");
+
+    EXPECT_FALSE(retryMount("Slot_3", 1U, 0U));
+    EXPECT_EQ(creds[1], nullptr);
+}
+
+TEST(RetryMount, SingleRetryNfsPathCatchesDbusErrorAndNullifiesCreds)
+{
+    boost::asio::io_context io;
+    creds[0] = std::make_shared<Credentials>(io, "nfs://server/export/disk.img",
+                                             true, "session_12");
+
+    EXPECT_FALSE(retryMount("Slot_2", 1U, 0U));
+    EXPECT_EQ(creds[0], nullptr);
 }
 
 TEST(MountMonitorThread, NullifiesCredsOnNotSameServer)
@@ -875,6 +1025,13 @@ TEST(DBusHelpers, PowerSaveModePathsAreCallable)
     SUCCEED();
 }
 
+TEST(DBusHelpers, PowerSaveModeIgnoresUnexpectedStatus)
+{
+    powerSaveMode(2);
+    powerSaveMode(-1);
+    SUCCEED();
+}
+
 // --------- Helpers (environment detection) ----------
 
 static bool configfs_available()
@@ -939,7 +1096,8 @@ TEST(DbusMonitor_Uncovered, SessionMonitorConstructsOrSkips)
     // Try to create connection - may succeed or fail based on environment
     try
     {
-        auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+        auto conn = std::make_shared<sdbusplus::asio::connection>(
+            io, sdbusplus::bus::new_bus());
         DbusMonitor mon;
 
         // Just constructing the match object should be fine; we don't pump io
@@ -1159,4 +1317,113 @@ TEST(DbusMonitor, HandleSessionsNoActiveNoFork)
     EXPECT_NO_THROW(mon.handleSessions(list));
 
     SUCCEED();
+}
+
+TEST(DbusMonitor, SessionMonitorProcessesMatchingPropertiesChangedSignal)
+{
+    boost::asio::io_context io;
+
+    try
+    {
+        auto conn = std::make_shared<sdbusplus::asio::connection>(
+            io, sdbusplus::bus::new_bus());
+        DbusMonitor mon;
+        auto match = mon.sessionMonitor(conn);
+        (void)match;
+
+        activeSessons.clear();
+
+        boost::container::flat_map<std::string, vmediaPropertyVariant> props;
+        sessionList updatedList{{static_cast<uint8_t>(42), "127.0.0.1",
+                                 "tester", static_cast<uint8_t>(VMEDIA),
+                                 static_cast<uint8_t>(PRIV_LEVEL_ADMIN),
+                                 static_cast<uint8_t>(7), "remote", "Slot_1"}};
+        props.emplace("VmediaSessionInfo", updatedList);
+
+        emitSessionPropertiesChanged(sessMgrVmediaIface, props);
+
+        pumpBus(*conn);
+        EXPECT_TRUE(activeSessons.empty());
+
+        activeSessons.clear();
+    }
+    catch (const std::exception& e)
+    {
+        GTEST_SKIP() << "D-Bus signal test unavailable in this environment: "
+                     << e.what();
+    }
+}
+
+TEST(DbusMonitor, SessionMonitorIgnoresNonMatchingInterfaceSignal)
+{
+    boost::asio::io_context io;
+
+    try
+    {
+        auto conn = std::make_shared<sdbusplus::asio::connection>(
+            io, sdbusplus::bus::new_bus());
+        DbusMonitor mon;
+        auto match = mon.sessionMonitor(conn);
+        (void)match;
+
+        activeSessons.clear();
+        activeSessons.insert({"Slot_2", static_cast<uint8_t>(7)});
+
+        boost::container::flat_map<std::string, vmediaPropertyVariant> props;
+        sessionList updatedList{{static_cast<uint8_t>(42), "127.0.0.1",
+                                 "tester", static_cast<uint8_t>(VMEDIA),
+                                 static_cast<uint8_t>(PRIV_LEVEL_ADMIN),
+                                 static_cast<uint8_t>(7), "remote", "Slot_1"}};
+        props.emplace("VmediaSessionInfo", updatedList);
+
+        emitSessionPropertiesChanged(sessMgrWebIface, props);
+
+        pumpBus(*conn);
+        EXPECT_EQ(activeSessons.size(), 1U);
+        EXPECT_EQ(activeSessons["Slot_2"], 7);
+
+        activeSessons.clear();
+    }
+    catch (const std::exception& e)
+    {
+        GTEST_SKIP() << "D-Bus signal test unavailable in this environment: "
+                     << e.what();
+    }
+}
+
+TEST(DbusMonitor, SessionMonitorIgnoresNonSessionProperty)
+{
+    boost::asio::io_context io;
+
+    try
+    {
+        auto conn = std::make_shared<sdbusplus::asio::connection>(
+            io, sdbusplus::bus::new_bus());
+        DbusMonitor mon;
+        auto match = mon.sessionMonitor(conn);
+        (void)match;
+
+        activeSessons.clear();
+        activeSessons.insert({"Slot_2", static_cast<uint8_t>(7)});
+
+        boost::container::flat_map<std::string, vmediaPropertyVariant> props;
+        sessionList updatedList{{static_cast<uint8_t>(42), "127.0.0.1",
+                                 "tester", static_cast<uint8_t>(VMEDIA),
+                                 static_cast<uint8_t>(PRIV_LEVEL_ADMIN),
+                                 static_cast<uint8_t>(7), "remote", "Slot_1"}};
+        props.emplace("DifferentProperty", updatedList);
+
+        emitSessionPropertiesChanged(sessMgrVmediaIface, props);
+
+        pumpBus(*conn);
+        EXPECT_EQ(activeSessons.size(), 1U);
+        EXPECT_EQ(activeSessons["Slot_2"], 7);
+
+        activeSessons.clear();
+    }
+    catch (const std::exception& e)
+    {
+        GTEST_SKIP() << "D-Bus signal test unavailable in this environment: "
+                     << e.what();
+    }
 }
