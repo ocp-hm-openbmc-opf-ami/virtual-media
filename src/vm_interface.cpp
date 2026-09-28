@@ -73,7 +73,10 @@ void Interface::saveImageURLToJson(const std::string& imageURL,
         return;
     }
 
-    loadJson();
+    if (loadJson() != 0)
+    {
+        return;
+    }
     if (jsonData.contains("BackupImageURL") &&
         jsonData["BackupImageURL"].contains(slotKey))
     {
@@ -105,7 +108,10 @@ void Interface::loadImageURLFromJson()
 {
     std::string slot2ImageURL, slot3ImageURL;
 
-    loadJson();
+    if (loadJson() != 0)
+    {
+        return;
+    }
     if (jsonData.contains("BackupImageURL") &&
         jsonData["BackupImageURL"].contains("Slot_2") &&
         jsonData["BackupImageURL"]["Slot_2"].contains("ImageURL"))
