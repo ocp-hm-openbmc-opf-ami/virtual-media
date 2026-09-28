@@ -1,5 +1,5 @@
 project('boost', 'cpp',
-         version: '1.77',
+         version: '1.88',
          meson_version: '>=0.56.0')
 
 cxx = meson.get_compiler('cpp')
@@ -8,7 +8,7 @@ cxx = meson.get_compiler('cpp')
 build_dir = join_paths(meson.current_source_dir(), 'build')
 r = run_command('[','!','-d', build_dir, ']')
 if r.returncode() == 0
-      r = run_command('./bootstrap.sh', '--with-libraries=coroutine,filesystem,iostreams,program_options,regex,system')
+      r = run_command('./bootstrap.sh', '--with-libraries=coroutine,filesystem,iostreams,program_options,regex,system,context,thread,process')
       assert(r.returncode() == 0,
             'Bootstrap failed' +
             '\nstdout: ' + r.stdout().strip() +
@@ -38,6 +38,7 @@ boost_dep = declare_dependency(
                        cxx.find_library('boost_thread', dirs: lib_dir, static: true),
                        cxx.find_library('boost_coroutine', dirs: lib_dir, static: true),
                        cxx.find_library('boost_iostreams', dirs: lib_dir, static: true),
+		       cxx.find_library('boost_process', dirs: lib_dir, static: true),
 		       custom_dep
 		      ])
 

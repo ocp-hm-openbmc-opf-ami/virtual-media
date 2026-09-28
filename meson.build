@@ -1,6 +1,7 @@
 project(
     'virtual-media',
     'cpp',
+    meson_version: '>=1.1.1',
     default_options: [
         'warning_level=3',
         'werror=true',
@@ -158,17 +159,27 @@ else
     nlohmann_json = nlohmann_json.as_system('system')
 endif
 
+if not get_option('tests').enabled()
 sdbusplus = dependency('sdbusplus', required: false)
 if not sdbusplus.found()
   sdbusplus_proj = subproject('sdbusplus', required: true)
   sdbusplus = sdbusplus_proj.get_variable('sdbusplus_dep')
   sdbusplus = sdbusplus.as_system('system')
 endif
-
+endif
 nbd = dependency('nbd',
                   version: '>=3.17',
                   fallback:['nbd','nbd_dep'])
 
+if get_option('tests').enabled()
+boost_proj = subproject('boost',required: true,)
+boost = boost_proj.get_variable('boost_dep')
+    add_project_arguments('-Wno-error=extra',
+			'-Wno-error=maybe-uninitialized',
+			language:['cpp'])
+    sdbusplus = subproject('sdbusplus').get_variable('sdbusplus_dep')
+    meson.override_dependency('sdbusplus', sdbusplus)
+else
 boost = dependency('boost',
                    modules: ['coroutine', 'iostreams', 'filesystem',
 			'program_options', 'regex', 'system',
@@ -177,6 +188,7 @@ boost = dependency('boost',
                    fallback : ['boost', 'boost_dep'],
                    static: false,
                    required: true)
+endif
 
 
 add_project_arguments(
